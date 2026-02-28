@@ -13,7 +13,6 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # --- CONFIGURAÇÃO VISUAL DO APP ---
 st.set_page_config(page_title="FLV Enterprise - Tome Leve", page_icon="🍎", layout="wide")
 
-# Resolvido o conflito do Modo Escuro (Tela Branca Fantasma)
 st.markdown("""
     <style>
     div.stButton > button:first-child {
@@ -26,10 +25,10 @@ st.markdown("""
 st.title("🍎 Sistema Integrado FLV Enterprise")
 
 # ==========================================================
-# CÉREBRO LÓGICO DA AUDITORIA E TAXONOMIA
+# CÉREBRO LÓGICO E TAXONOMIA
 # ==========================================================
 NAMESPACE_NFE = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
-DB_NAME = "auditoria_flv_app.db"
+DB_NAME = "auditoria_flv_app_v25.db" # Banco atualizado para suportar as novas colunas
 TOLERANCIA_DIF = 0.001
 
 def normalizar(texto):
@@ -115,22 +114,32 @@ def criar_banco():
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("""
-        CREATE TABLE IF NOT EXISTS auditoria (
+        CREATE TABLE IF NOT EXISTS auditoria_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT, id_execucao TEXT, loja TEXT, fornecedor TEXT,
             produto_pedido TEXT, produto_xml TEXT, qtd_pedido REAL, qtd_nota REAL,
-            diferenca REAL, status_visual TEXT, status_codigo INTEGER
+            diferenca REAL, status_visual TEXT, status_codigo INTEGER,
+            qtd_fisico TEXT, padrao_fisico TEXT, status_doca TEXT, diferenca_doca REAL
         )
         """)
         conn.commit()
 
 def classificar(qtd_ped, qtd_fat, tipo):
-    if tipo == "SEM_FORNECEDOR": return ("⚪ SEM NOTA P/ FORNECEDOR", 98, -qtd_ped)
+    if tipo == "SEM_FORNECEDOR": return ("⚪ SEM NFe P/ FORN", 98, -qtd_ped)
     if tipo == "SEM_PRODUTO": return ("⚪ PRODUTO NÃO FATURADO", 99, -qtd_ped)
     diferenca = qtd_fat - qtd_ped
     if abs(diferenca) < TOLERANCIA_DIF: return ("🟢 OK", 0, 0.0)
-    if diferenca < 0: return (f"🔴 FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
-    return (f"🟡 SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
+    if diferenca < 0: return (f"🔴 NFe FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
+    return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
 
+def classificar_doca(qtd_xml, qtd_fisico):
+    diferenca = qtd_fisico - qtd_xml
+    if abs(diferenca) < TOLERANCIA_DIF: return "🟢 FÍSICO BATEU"
+    if diferenca < 0: return f"🔴 FÍSICO FALTOU {abs(diferenca):.2f}".replace('.00','')
+    return f"🟡 FÍSICO SOBROU {diferenca:.2f}".replace('.00','')
+
+# ==========================================================
+# GERADOR DE EXCEL TRIPLO
+# ==========================================================
 def gerar_excel_auditoria(df_final):
     df_final = df_final.fillna("")
     wb = Workbook()
@@ -139,12 +148,13 @@ def gerar_excel_auditoria(df_final):
     for loja in sorted(df_final['loja'].unique()):
         df_loja = df_final[df_final['loja'] == loja].copy()
         ws = wb.create_sheet(title=loja)
-        ws.append([f"AUDITORIA - {loja.upper().replace('_', ' ')}"])
-        ws.merge_cells('A1:E1')
+        ws.append([f"AUDITORIA 3 VIAS - {loja.upper().replace('_', ' ')}"])
+        ws.merge_cells('A1:H1')
         ws['A1'].fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
         ws['A1'].font = Font(color="FFFFFF", bold=True, size=14)
         ws['A1'].alignment = Alignment(horizontal="center", vertical="center")
-        ws.append(['Produto Pedido', 'Qtd Pedida', 'Produto na Nota (XML)', 'Qtd Nota', 'Status'])
+        
+        ws.append(['Produto Pedido', 'Qtd Ped', 'Produto NFe', 'Qtd NFe', 'Status NFe', 'Qtd Doca', 'Padrão', 'Status Doca (Físico x NFe)'])
         for cell in ws[2]: cell.font = Font(bold=True)
 
         current_forn = None
@@ -152,8 +162,8 @@ def gerar_excel_auditoria(df_final):
             if row['fornecedor'] != current_forn:
                 if current_forn is not None: ws.append([])
                 current_forn = row['fornecedor']
-                ws.append([f"Fornecedor: {current_forn}", "", "", "", ""])
-                ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=5)
+                ws.append([f"Fornecedor: {current_forn}", "", "", "", "", "", "", ""])
+                ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=8)
                 for cell in ws[ws.max_row]:
                     if "FATURADO SEM PEDIDO" in current_forn:
                         cell.fill = PatternFill(start_color="E4DFEC", end_color="E4DFEC", fill_type="solid")
@@ -162,109 +172,67 @@ def gerar_excel_auditoria(df_final):
                         cell.fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
                         cell.font = Font(color="002060", bold=True)
 
-            ws.append([row['produto_pedido'], row['qtd_pedido'], row['produto_xml'], row['qtd_nota'], row['status_visual']])
-            status_cell = ws.cell(row=ws.max_row, column=5)
-            val = status_cell.value
-            if val:
-                if "🟢" in val: status_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-                elif "🔴" in val: status_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                elif "🟡" in val: status_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-                elif "🔵" in val: status_cell.fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")
-                elif "⚪" in val: status_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-                elif "🟣" in val: status_cell.fill = PatternFill(start_color="E4DFEC", end_color="E4DFEC", fill_type="solid")
+            ws.append([
+                row['produto_pedido'], row['qtd_pedido'], row['produto_xml'], row['qtd_nota'], 
+                row['status_visual'], row['qtd_fisico'], row['padrao_fisico'], row['status_doca']
+            ])
+            
+            # Colore a coluna Status NFe
+            status_nfe_cell = ws.cell(row=ws.max_row, column=5)
+            val_nfe = status_nfe_cell.value
+            if val_nfe:
+                if "🟢" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                elif "🔴" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                elif "🟡" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+                elif "🔵" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="B4C6E7", end_color="B4C6E7", fill_type="solid")
+                elif "⚪" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                elif "🟣" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="E4DFEC", end_color="E4DFEC", fill_type="solid")
 
-        for col in ['A', 'C']: ws.column_dimensions[col].width = 45
-        for col in ['B', 'D']: ws.column_dimensions[col].width = 15
-        ws.column_dimensions['E'].width = 45
+            # Colore a coluna Status Doca
+            status_doca_cell = ws.cell(row=ws.max_row, column=8)
+            val_doca = status_doca_cell.value
+            if val_doca:
+                if "🟢" in val_doca: status_doca_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                elif "🔴" in val_doca: status_doca_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                elif "🟡" in val_doca: status_doca_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+                elif "⚪" in val_doca: status_doca_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+
+        ws.column_dimensions['A'].width = 35
+        ws.column_dimensions['B'].width = 10
+        ws.column_dimensions['C'].width = 35
+        ws.column_dimensions['D'].width = 10
+        ws.column_dimensions['E'].width = 25
+        ws.column_dimensions['F'].width = 12
+        ws.column_dimensions['G'].width = 10
+        ws.column_dimensions['H'].width = 28
     return wb
 
-def gerar_dashboard_operacional(id_execucao):
-    with sqlite3.connect(DB_NAME) as conn:
-        df = pd.read_sql("SELECT * FROM auditoria WHERE id_execucao = ?", conn, params=[id_execucao])
-    df_problemas = df[df['status_codigo'].isin([-1, 1, 98, 99])]
-    if df_problemas.empty: return None
-
-    resumo = df_problemas.groupby(['loja','fornecedor']).agg(
-        Itens_Divergentes=('id','count'), Saldo_Kg_Divergente=('diferenca','sum')
-    ).reset_index().sort_values(by=["loja", "Saldo_Kg_Divergente"])
-
-    wb_dash = Workbook()
-    ws_dash = wb_dash.active
-    ws_dash.title = "Resumo_Estoque"
-    ws_dash.append(["DASHBOARD OPERACIONAL - DIVERGÊNCIAS DE ESTOQUE"])
-    ws_dash.merge_cells('A1:D1')
-    ws_dash['A1'].fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
-    ws_dash['A1'].font = Font(color="FFFFFF", bold=True, size=14)
-    ws_dash['A1'].alignment = Alignment(horizontal="center", vertical="center")
-
-    ws_dash.append(['Loja', 'Fornecedor (Aba do Pedido)', 'Itens c/ Erro na Doca', 'Falta/Sobra (Kg ou Unid)'])
-    for cell in ws_dash[2]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-
-    loja_atual = None
-    for _, row in resumo.iterrows():
-        if row['loja'] != loja_atual:
-            loja_atual = row['loja']
-            ws_dash.append([f"⯈ {loja_atual.upper().replace('_', ' ')}", "", "", ""])
-            ws_dash.merge_cells(start_row=ws_dash.max_row, start_column=1, end_row=ws_dash.max_row, end_column=4)
-            ws_dash.cell(row=ws_dash.max_row, column=1).fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-            ws_dash.cell(row=ws_dash.max_row, column=1).font = Font(color="002060", bold=True)
-
-        ws_dash.append([row['loja'], row['fornecedor'], row['Itens_Divergentes'], row['Saldo_Kg_Divergente']])
-        saldo_cell = ws_dash.cell(row=ws_dash.max_row, column=4)
-        if saldo_cell.value and float(saldo_cell.value) < 0:
-            saldo_cell.font = Font(color="9C0006", bold=True)
-            saldo_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        elif saldo_cell.value and float(saldo_cell.value) > 0:
-            saldo_cell.font = Font(color="006100", bold=True)
-            saldo_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
-    ws_dash.column_dimensions['A'].width = 15
-    ws_dash.column_dimensions['B'].width = 35
-    ws_dash.column_dimensions['C'].width = 25
-    ws_dash.column_dimensions['D'].width = 30
-    return wb_dash
-
 # ==========================================================
-# CRIAÇÃO DAS ABAS (TABS) DA INTERFACE
+# INTERFACE PRINCIPAL
 # ==========================================================
-aba_preparador, aba_auditoria = st.tabs(["🧹 1. Preparador de Pedidos", "🍎 2. Auditoria de XMLs"])
+aba_preparador, aba_auditoria = st.tabs(["🧹 1. Preparador de Pedidos", "🍎 2. Auditoria 3 Vias (NFe x Doca)"])
 
 # ----------------------------------------------------------
-# TELA 1: PREPARADOR DE PLANILHA DO COMPRADOR
+# TELA 1: PREPARADOR DE PLANILHA
 # ----------------------------------------------------------
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador")
-    st.write("Insira a planilha bruta recebida do comprador para limpá-la, aplicar o design corporativo e isolar suas docas (Loja 5 removida).")
-    
-    arquivo_bruto = st.file_uploader("Arraste a Planilha Bruta (CSV ou Excel) aqui", type=['csv', 'xlsx'], key="uploader_bruto")
-    
+    arquivo_bruto = st.file_uploader("Arraste a Planilha Bruta (CSV ou Excel)", type=['csv', 'xlsx'], key="uploader_bruto")
     if st.button("Limpar e Preparar Planilha"):
         if not arquivo_bruto:
             st.warning("Envie a planilha bruta primeiro.")
         else:
-            with st.spinner("Lendo estrutura, mapeando colunas e aplicando blindagem..."):
+            with st.spinner("Lendo estrutura e blindando..."):
                 try:
                     nome_planilha = arquivo_bruto.name
                     if nome_planilha.endswith('.csv'):
                         df_bruto = pd.read_csv(arquivo_bruto, header=None)
                     else:
                         todas_as_abas = pd.read_excel(arquivo_bruto, sheet_name=None, header=None)
-                        abas_validas = []
-                        for nome_aba, df_aba in todas_as_abas.items():
-                            if str(nome_aba).lower() in ['ped', 'com', 'sis'] or str(nome_aba).isdigit():
-                                continue
-                            abas_validas.append(df_aba)
-                        if abas_validas:
-                            df_bruto = pd.concat(abas_validas, ignore_index=True)
-                        else:
-                            df_bruto = pd.read_excel(arquivo_bruto, header=None)
+                        abas_validas = [df for n, df in todas_as_abas.items() if str(n).lower() not in ['ped', 'com', 'sis'] and not str(n).isdigit()]
+                        df_bruto = pd.concat(abas_validas, ignore_index=True) if abas_validas else pd.read_excel(arquivo_bruto, header=None)
 
-                    lojas_alvo = {}
-                    coluna_padrao = -1
-                    coluna_custo = -1
-
+                    lojas_alvo, coluna_padrao, coluna_custo = {}, -1, -1
                     for index, row in df_bruto.head(50).iterrows():
                         for col_idx, val in enumerate(row):
                             texto = str(val).strip().upper()
@@ -276,72 +244,54 @@ with aba_preparador:
                             elif texto == 'L8': lojas_alvo['Loja_8'] = col_idx
                             elif 'PADRÃO' in texto or 'PADRAO' in texto: coluna_padrao = col_idx
                             elif 'CUSTO' in texto: coluna_custo = col_idx
-
-                        if lojas_alvo: 
-                            break
+                        if lojas_alvo: break
 
                     max_col = df_bruto.shape[1]
                     if coluna_padrao == -1: coluna_padrao = 10 if max_col > 10 else (max_col - 1)
                     if coluna_custo == -1: coluna_custo = 11 if max_col > 11 else (max_col - 1)
 
-                    fornecedor_atual = "DESCONHECIDO"
-                    cod_fornecedor_atual = "-"
-                    lista_fornecedores = []
-                    lista_codigos = []
-
+                    fornecedor_atual, cod_fornecedor_atual = "DESCONHECIDO", "-"
+                    lista_fornecedores, lista_codigos = [], []
                     for index, row in df_bruto.iterrows():
-                        col0_str = str(row[0]).strip().upper()
-                        col1_str = str(row[1]).strip()
-
+                        col0_str, col1_str = str(row[0]).strip().upper(), str(row[1]).strip()
                         if "PEDIDO FLV" in col0_str:
                             nome_sujo = col0_str.replace("PEDIDO FLV", "").split("202")[0].replace(",", "").strip()
                             fornecedor_atual = nome_sujo if nome_sujo else "FORNECEDOR"
                         elif "CÓD" in col0_str and "FORN" in col0_str:
                             cod_fornecedor_atual = col1_str
-
                         lista_fornecedores.append(fornecedor_atual)
                         lista_codigos.append(cod_fornecedor_atual)
 
                     df_bruto['Fornecedor'] = lista_fornecedores
                     df_bruto['Cod_Fornecedor'] = lista_codigos
-
                     df_bruto[0] = pd.to_numeric(df_bruto[0], errors='coerce')
                     df_dados = df_bruto.dropna(subset=[0]).copy()
                     df_dados[0] = df_dados[0].astype(int)
 
                     wb = Workbook()
                     wb.remove(wb.active)
-
                     fill_loja = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
                     font_loja = Font(color="FFFFFF", bold=True, size=14)
-                    align_center = Alignment(horizontal="center", vertical="center")
                     fill_fornecedor = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
                     font_fornecedor = Font(color="002060", bold=True, size=11)
-                    font_cabecalho = Font(bold=True)
 
                     for nome_loja, indice_coluna in lojas_alvo.items():
                         if indice_coluna >= max_col: continue
-
                         df_loja = df_dados[[0, 1, 'Cod_Fornecedor', 'Fornecedor', indice_coluna, coluna_padrao, coluna_custo]].copy()
                         df_loja.columns = ['Código', 'Descrição', 'Cod_Fornecedor', 'Fornecedor', 'Qtd_Pedida', 'Padrão_Cx', 'Custo']
-
                         df_loja['Qtd_Pedida'] = pd.to_numeric(df_loja['Qtd_Pedida'], errors='coerce')
                         df_loja['Custo'] = pd.to_numeric(df_loja['Custo'], errors='coerce').fillna(0)
                         df_loja = df_loja[df_loja['Qtd_Pedida'] > 0]
 
                         if df_loja.empty: continue
-
                         df_loja = df_loja.sort_values(by=['Fornecedor', 'Descrição'])
                         ws = wb.create_sheet(title=nome_loja)
-
                         ws.append([f"CONFERÊNCIA - {nome_loja.upper().replace('_', ' ')}"])
                         ws.merge_cells('A1:E1')
                         ws['A1'].fill = fill_loja
                         ws['A1'].font = font_loja
-                        ws['A1'].alignment = align_center
-
                         ws.append(['Código', 'Descrição', 'Qtd_Pedida', 'Padrão_Cx', 'Custo'])
-                        for cell in ws[2]: cell.font = font_cabecalho
+                        for cell in ws[2]: cell.font = Font(bold=True)
 
                         current_forn = None
                         for _, row in df_loja.iterrows():
@@ -349,61 +299,52 @@ with aba_preparador:
                                 if current_forn is not None: ws.append([])
                                 current_forn = row['Fornecedor']
                                 cod_forn = row['Cod_Fornecedor']
-
                                 ws.append([f"Fornecedor: {cod_forn} - {current_forn}", "", "", "", ""])
                                 row_idx = ws.max_row
                                 ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
                                 for cell in ws[row_idx]:
                                     cell.fill = fill_fornecedor
                                     cell.font = font_fornecedor
-
                             ws.append([row['Código'], row['Descrição'], row['Qtd_Pedida'], row['Padrão_Cx'], row['Custo']])
-                            celula_custo = ws.cell(row=ws.max_row, column=5)
-                            celula_custo.number_format = 'R$ #,##0.00'
+                            ws.cell(row=ws.max_row, column=5).number_format = 'R$ #,##0.00'
 
-                        ws.column_dimensions['A'].width = 12
                         ws.column_dimensions['B'].width = 45
-                        ws.column_dimensions['C'].width = 15
-                        ws.column_dimensions['D'].width = 15
-                        ws.column_dimensions['E'].width = 15
+                        for c in ['A','C','D','E']: ws.column_dimensions[c].width = 15
 
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
-                    
-                    st.success("✨ Planilha preparada com sucesso! Baixe o arquivo abaixo e use-o na Aba 2 ou envie para as lojas.")
-                    st.download_button(
-                        label="📥 Baixar Planilha de Pedidos Blindada", 
-                        data=out_excel.getvalue(), 
-                        file_name=f"Pedidos_FLV_Blindado_{datetime.now().strftime('%Y%m%d')}.xlsx", 
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
+                    st.success("✨ Planilha preparada! Baixe e use na Auditoria ou envie para a Doca.")
+                    st.download_button(label="📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e:
-                    st.error(f"❌ Erro ao processar a planilha bruta: {e}")
+                    st.error(f"Erro: {e}")
 
 # ----------------------------------------------------------
-# TELA 2: A AUDITORIA (MOTOR V21)
+# TELA 2: AUDITORIA 3 VIAS (NOVO MOTOR)
 # ----------------------------------------------------------
 with aba_auditoria:
-    st.header("🍎 Auditoria de XMLs (Cruzamento Inteligente)")
+    st.header("🍎 Cruzamento Triplo: Pedido vs XML vs Físico")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.subheader("1. Planilha de Pedidos")
-        arquivo_excel = st.file_uploader("Arraste o Excel de Pedidos (Gerado na Aba 1) aqui", type=['xlsx'], key="uploader_pedidos_audit")
+        st.subheader("1. Pedidos (Excel)")
+        arquivo_excel = st.file_uploader("Arraste o Pedido", type=['xlsx'], key="uploader_pedidos")
     with col2:
-        st.subheader("2. Notas Fiscais (XML)")
-        arquivos_xml = st.file_uploader("Arraste os XMLs dos Fornecedores", type=['xml'], accept_multiple_files=True, key="uploader_xmls")
+        st.subheader("2. Notas (XMLs)")
+        arquivos_xml = st.file_uploader("Arraste os XMLs", type=['xml'], accept_multiple_files=True, key="uploader_xmls")
+    with col3:
+        st.subheader("3. Doca (Opcional)")
+        arquivos_contagem = st.file_uploader("Arraste o Romaneio", type=['xlsx', 'csv'], accept_multiple_files=True, key="uploader_contagem")
 
-    if st.button("Executar Auditoria Implacável"):
+    if st.button("Executar Auditoria Tripla Implacável"):
         if not arquivo_excel or not arquivos_xml:
-            st.warning("⚠️ Você precisa enviar a planilha de pedidos e pelo menos um arquivo XML.")
+            st.warning("⚠️ Você precisa de pelo menos o Pedido e os XMLs.")
         else:
-            with st.spinner("Sexta-feira processando os dados e rastreando sobras de estoque..."):
+            with st.spinner("Sexta-feira processando os 3 fluxos de dados..."):
                 criar_banco()
                 id_execucao = datetime.now().strftime("%Y%m%d%H%M%S")
 
                 try:
+                    # LENDO PEDIDOS
                     df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
                     pedidos_lista = []
                     for aba, df in df_pedidos_raw.items():
@@ -424,6 +365,7 @@ with aba_auditoria:
                     df_pedidos = df_pedidos[~df_pedidos['Loja'].astype(str).str.upper().str.contains('5')]
                     df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
 
+                    # LENDO XMLs
                     notas = []
                     for xml_file in arquivos_xml:
                         try:
@@ -431,12 +373,10 @@ with aba_auditoria:
                             root = tree.getroot()
                             inf = root.find('.//nfe:infNFe', NAMESPACE_NFE)
                             if inf is None: continue
-                            
                             emit_node = inf.find('nfe:emit/nfe:xNome', NAMESPACE_NFE)
                             dest_node = inf.find('nfe:dest/nfe:CNPJ', NAMESPACE_NFE)
                             dest_nome_node = inf.find('nfe:dest/nfe:xNome', NAMESPACE_NFE)
-                            
-                            fornecedor_xml_macro = traduzir_fornecedor(emit_node.text) if emit_node is not None else "DESCONHECIDO"
+                            forn_macro = traduzir_fornecedor(emit_node.text) if emit_node is not None else "DESCONHECIDO"
                             cnpj_xml = dest_node.text if dest_node is not None else "0"
                             nome_xml_dest = dest_nome_node.text if dest_nome_node is not None else ""
                             loja_xml = descobrir_loja(cnpj_xml, nome_xml_dest)
@@ -445,102 +385,131 @@ with aba_auditoria:
                                 prod_node = det.find('nfe:prod/nfe:xProd', NAMESPACE_NFE)
                                 qtd_node = det.find('nfe:prod/nfe:qCom', NAMESPACE_NFE)
                                 if prod_node is None or qtd_node is None: continue
-                                notas.append({
-                                    "Loja": loja_xml, "Fornecedor_Macro": fornecedor_xml_macro,
-                                    "Produto": normalizar(prod_node.text), "Qtd": float(qtd_node.text)
-                                })
-                        except Exception as e: pass
-                        
+                                notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": normalizar(prod_node.text), "Qtd": float(qtd_node.text)})
+                        except: pass
                     df_notas = pd.DataFrame(notas)
                     if not df_notas.empty:
                         df_notas = df_notas[df_notas['Loja'] != 'Loja_5']
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
-                    else:
-                        df_notas_agg = pd.DataFrame()
+                    else: df_notas_agg = pd.DataFrame()
 
+                    # LENDO ARQUIVOS DA DOCA (OPCIONAL)
+                    contagens_lista = []
+                    if arquivos_contagem:
+                        for f in arquivos_contagem:
+                            nome_arq = f.name.upper()
+                            loja_cont = "Loja_Desconhecida"
+                            for l in ['LOJA_1', 'LOJA_2', 'LOJA_3', 'LOJA_5', 'LOJA_6', 'LOJA_7', 'LOJA_8']:
+                                if l in nome_arq:
+                                    loja_cont = l.capitalize()
+                                    break
+                            try:
+                                if f.name.endswith('.csv'): df_c = pd.read_csv(f)
+                                else: df_c = pd.read_excel(f)
+                                
+                                cols = [str(c).upper().strip() for c in df_c.columns]
+                                df_c.columns = cols
+                                
+                                col_forn = next((c for c in cols if 'FORN' in c), None)
+                                col_prod = next((c for c in cols if 'PROD' in c or 'DESC' in c), None)
+                                col_qtd = next((c for c in cols if 'QTD' in c or 'FÍSICO' in c or 'FISICO' in c), None)
+                                col_pad = next((c for c in cols if 'PADR' in c), None)
+                                
+                                if col_prod and col_qtd:
+                                    for _, row in df_c.iterrows():
+                                        prod = normalizar(row[col_prod])
+                                        forn_macro = traduzir_fornecedor(str(row[col_forn])) if col_forn else "DESCONHECIDO"
+                                        qtd = pd.to_numeric(row[col_qtd], errors='coerce')
+                                        if pd.isna(qtd): qtd = 0.0
+                                        pad = str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
+                                        if prod:
+                                            contagens_lista.append({'Loja': loja_cont, 'Fornecedor_Macro': forn_macro, 'Produto': prod, 'Qtd_Fisico': float(qtd), 'Padrao_Fisico': pad})
+                            except: pass
+                    df_contagens = pd.DataFrame(contagens_lista)
+
+                    # CRUZAMENTO TRIPLO MESTRE
                     registros = []
                     for (loja, forn_macro), df_ped_group in df_pedidos.groupby(['Loja', 'Fornecedor_Macro']):
-                        if df_notas_agg.empty:
-                            notas_forn = pd.DataFrame()
-                        else:
-                            notas_forn = df_notas_agg[(df_notas_agg['Loja'] == loja) & (df_notas_agg['Fornecedor_Macro'] == forn_macro)]
+                        notas_forn = df_notas_agg[(df_notas_agg['Loja'] == loja) & (df_notas_agg['Fornecedor_Macro'] == forn_macro)] if not df_notas_agg.empty else pd.DataFrame()
 
                         if notas_forn.empty:
                             for _, ped in df_ped_group.iterrows():
                                 stat_v, stat_c, dif = classificar(ped['Qtd'], 0, "SEM_FORNECEDOR")
-                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NOTA NÃO ENCONTRADA", ped['Qtd'], 0, dif, stat_v, stat_c))
+                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NOTA NÃO ENCONTRADA", ped['Qtd'], 0, dif, stat_v, stat_c, "-", "-", "⚪ SEM CONTAGEM", 0.0))
                             continue
 
-                        matched_ped_idx = set()
-                        matched_xml_idx = set()
-                        pairs = []
-                        
+                        matched_ped_idx, matched_xml_idx, pairs = set(), set(), []
                         for idx_ped, ped in df_ped_group.iterrows():
-                            familia_ped = descobrir_familia(ped['Produto'])
-                            fam_ampla_ped = familia_ped.split('_')[0] if familia_ped else ""
-                            
+                            fam_ped = descobrir_familia(ped['Produto'])
+                            fam_ampla_ped = fam_ped.split('_')[0] if fam_ped else ""
                             for idx_xml, nota in notas_forn.iterrows():
-                                prod_xml = nota['Produto']
-                                familia_xml = descobrir_familia(prod_xml)
-                                fam_ampla_xml = familia_xml.split('_')[0] if familia_xml else ""
-                                
-                                for root_word in ["MELANCIA", "BATATA", "CEBOLA", "ALHO"]:
-                                    if root_word in fam_ampla_ped or root_word in fam_ampla_xml:
-                                        fam_ampla_ped = familia_ped
-                                        fam_ampla_xml = familia_xml
-                                
-                                if familia_ped == familia_xml or fam_ampla_ped == fam_ampla_xml:
-                                    score = fuzz.token_sort_ratio(ped['Produto'], prod_xml)
-                                    pairs.append((score, idx_ped, idx_xml, prod_xml, ped['Qtd'], nota['Qtd']))
-                                    
+                                fam_xml = descobrir_familia(nota['Produto'])
+                                fam_ampla_xml = fam_xml.split('_')[0] if fam_xml else ""
+                                for rw in ["MELANCIA", "BATATA", "CEBOLA", "ALHO"]:
+                                    if rw in fam_ampla_ped or rw in fam_ampla_xml:
+                                        fam_ampla_ped, fam_ampla_xml = fam_ped, fam_xml
+                                if fam_ped == fam_xml or fam_ampla_ped == fam_ampla_xml:
+                                    pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd']))
                         pairs.sort(key=lambda x: x[0], reverse=True)
                         
+                        # 1. Produtos que bateram Pedido x XML
                         for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat in pairs:
                             if idx_ped not in matched_ped_idx and idx_xml not in matched_xml_idx:
-                                matched_ped_idx.add(idx_ped)
-                                matched_xml_idx.add(idx_xml)
-                                
+                                matched_ped_idx.add(idx_ped); matched_xml_idx.add(idx_xml)
                                 ped = df_ped_group.loc[idx_ped]
-                                if forn_macro == "DRUB" and "PIMENTAO" in descobrir_familia(ped['Produto']):
-                                    stat_v, stat_c, dif = "🔵 AVALIAR PESO (PEDIDO EM UN vs XML EM KG)", 0, 0.0
-                                else:
-                                    stat_v, stat_c, dif = classificar(qtd_ped, qtd_fat, "OK")
-                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, dif, stat_v, stat_c))
+                                stat_v, stat_c, dif = classificar(qtd_ped, qtd_fat, "OK")
+                                
+                                qtd_fisico, pad_fisico, stat_doca, dif_doca = "-", "-", "⚪ SEM CONTAGEM", 0.0
+                                if not df_contagens.empty:
+                                    match_fis = df_contagens[(df_contagens['Loja'] == loja) & (df_contagens['Produto'] == normalizar(ped['Produto']))]
+                                    if not match_fis.empty:
+                                        qtd_fisico = match_fis['Qtd_Fisico'].sum()
+                                        pad_fisico = " | ".join([p for p in match_fis['Padrao_Fisico'].unique() if str(p).strip()])
+                                        dif_doca = qtd_fisico - qtd_fat
+                                        stat_doca = classificar_doca(qtd_fat, qtd_fisico)
+                                    else:
+                                        qtd_fisico, stat_doca, dif_doca = 0.0, classificar_doca(qtd_fat, 0.0), 0.0 - qtd_fat
+                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, dif, stat_v, stat_c, qtd_fisico, pad_fisico, stat_doca, dif_doca))
 
+                        # 2. Produtos do Pedido que não vieram na NFe
                         for idx_ped, ped in df_ped_group.iterrows():
                             if idx_ped not in matched_ped_idx:
                                 stat_v, stat_c, dif = classificar(ped['Qtd'], 0, "SEM_PRODUTO")
-                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], "❌ PRODUTO NÃO FATURADO", ped['Qtd'], 0, dif, stat_v, stat_c))
+                                qtd_fisico, pad_fisico, stat_doca, dif_doca = "-", "-", "⚪ SEM CONTAGEM", 0.0
+                                if not df_contagens.empty:
+                                    match_fis = df_contagens[(df_contagens['Loja'] == loja) & (df_contagens['Produto'] == normalizar(ped['Produto']))]
+                                    if not match_fis.empty:
+                                        qtd_fisico = match_fis['Qtd_Fisico'].sum()
+                                        pad_fisico = " | ".join([p for p in match_fis['Padrao_Fisico'].unique() if str(p).strip()])
+                                        dif_doca, stat_doca = qtd_fisico - 0, classificar_doca(0, qtd_fisico)
+                                    else:
+                                        qtd_fisico, stat_doca, dif_doca = 0.0, classificar_doca(0, 0.0), 0.0
+                                registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], "❌ PRODUTO NÃO FATURADO", ped['Qtd'], 0, dif, stat_v, stat_c, qtd_fisico, pad_fisico, stat_doca, dif_doca))
                         
+                        # 3. Produtos faturados sem Pedido
                         for idx_xml, nota in notas_forn.iterrows():
                             if idx_xml not in matched_xml_idx:
-                                prod_xml = nota['Produto']
-                                qtd_fat = nota['Qtd']
-                                fornecedor_extra = f"⚠️ {forn_macro} - FATURADO SEM PEDIDO"
-                                qtd_format = f"{qtd_fat:.2f}".replace('.00','')
-                                stat_v, stat_c, dif = f"🟣 SEM PEDIDO (SOBRA {qtd_format})", 1, qtd_fat
-                                registros.append((id_execucao, loja, fornecedor_extra, "❌ NÃO SOLICITADO", prod_xml, 0, qtd_fat, qtd_fat, stat_v, stat_c))
+                                prod_xml, qtd_fat = nota['Produto'], nota['Qtd']
+                                stat_v, stat_c, dif = f"🟣 SEM PEDIDO (SOBRA {qtd_fat:.2f})".replace('.00',''), 1, qtd_fat
+                                qtd_fisico, pad_fisico, stat_doca, dif_doca = "-", "-", "⚪ SEM CONTAGEM", 0.0
+                                if not df_contagens.empty:
+                                    qtd_fisico, stat_doca, dif_doca = 0.0, classificar_doca(qtd_fat, 0.0), 0.0 - qtd_fat
+                                registros.append((id_execucao, loja, f"⚠️ {forn_macro} - FATURADO SEM PEDIDO", "❌ NÃO SOLICITADO", prod_xml, 0, qtd_fat, dif, stat_v, stat_c, qtd_fisico, pad_fisico, stat_doca, dif_doca))
 
                     if registros:
                         df_final = pd.DataFrame(registros, columns=[
                             'id_execucao','loja','fornecedor','produto_pedido','produto_xml',
-                            'qtd_pedido','qtd_nota','diferenca','status_visual','status_codigo'
+                            'qtd_pedido','qtd_nota','diferenca','status_visual','status_codigo',
+                            'qtd_fisico', 'padrao_fisico', 'status_doca', 'diferenca_doca'
                         ])
                         df_final.sort_values(by=['loja', 'fornecedor', 'produto_pedido'], inplace=True)
                         with sqlite3.connect(DB_NAME) as conn:
-                            df_final.to_sql("auditoria", conn, if_exists="append", index=False)
-                        st.success("✅ Auditoria Concluída!")
+                            df_final.to_sql("auditoria_v2", conn, if_exists="append", index=False)
+                        st.success("✅ Auditoria Tripla Concluída com Sucesso!")
                         wb_audit = gerar_excel_auditoria(df_final)
                         out_audit = io.BytesIO()
                         wb_audit.save(out_audit)
-                        col_btn1, col_btn2 = st.columns(2)
-                        with col_btn1:
-                            st.download_button(label="📥 Baixar Auditoria Visual", data=out_audit.getvalue(), file_name=f"Auditoria_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                        wb_dash = gerar_dashboard_operacional(id_execucao)
-                        if wb_dash:
-                            out_dash = io.BytesIO()
-                            wb_dash.save(out_dash)
-                            with col_btn2:
-                                st.download_button(label="📊 Baixar Dashboard Operacional", data=out_dash.getvalue(), file_name=f"Dashboard_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        st.download_button(label="📥 Baixar Auditoria Definitiva (3 Vias)", data=out_audit.getvalue(), file_name=f"Auditoria_3Vias_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    else: st.error("❌ Erro. Nenhum dado foi processado.")
                 except Exception as e:
                     st.error(f"❌ Erro crítico: {e}")
