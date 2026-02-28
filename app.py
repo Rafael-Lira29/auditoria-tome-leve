@@ -13,9 +13,9 @@ from openpyxl.styles import PatternFill, Font, Alignment
 # --- CONFIGURAÇÃO VISUAL DO APP ---
 st.set_page_config(page_title="FLV Enterprise - Tome Leve", page_icon="🍎", layout="wide")
 
+# Resolvido o conflito do Modo Escuro (Tela Branca Fantasma)
 st.markdown("""
     <style>
-    .main { background-color: #f8f9fa; }
     div.stButton > button:first-child {
         background-color: #002060; color: white; height: 3em; font-weight: bold; width: 100%; border-radius: 8px;
     }
@@ -232,7 +232,7 @@ def gerar_dashboard_operacional(id_execucao):
 aba_preparador, aba_auditoria = st.tabs(["🧹 1. Preparador de Pedidos", "🍎 2. Auditoria de XMLs"])
 
 # ----------------------------------------------------------
-# TELA 1: O SEU CÓDIGO DE FILTRAGEM E MAPEAMENTO DINÂMICO
+# TELA 1: PREPARADOR DE PLANILHA DO COMPRADOR
 # ----------------------------------------------------------
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador")
@@ -271,7 +271,6 @@ with aba_preparador:
                             if texto == 'L1': lojas_alvo['Loja_1'] = col_idx
                             elif texto == 'L2': lojas_alvo['Loja_2'] = col_idx
                             elif texto == 'L3': lojas_alvo['Loja_3'] = col_idx
-                            # 🛡️ TRAVA SEXTA-FEIRA APLICADA NA RAIZ: Ignora a L5 se encontrar
                             elif texto == 'L6': lojas_alvo['Loja_6'] = col_idx
                             elif texto == 'L7': lojas_alvo['Loja_7'] = col_idx
                             elif texto == 'L8': lojas_alvo['Loja_8'] = col_idx
@@ -371,7 +370,7 @@ with aba_preparador:
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
                     
-                    st.success("✨ Planilha preparada com sucesso! Baixe o arquivo abaixo e use-o na Aba 2 (Auditoria).")
+                    st.success("✨ Planilha preparada com sucesso! Baixe o arquivo abaixo e use-o na Aba 2 ou envie para as lojas.")
                     st.download_button(
                         label="📥 Baixar Planilha de Pedidos Blindada", 
                         data=out_excel.getvalue(), 
@@ -391,7 +390,7 @@ with aba_auditoria:
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("1. Planilha de Pedidos")
-        arquivo_excel = st.file_uploader("Arraste o Excel de Pedidos (Gerado na Aba 1) aqui", type=['xlsx'], key="uploader_pedidos")
+        arquivo_excel = st.file_uploader("Arraste o Excel de Pedidos (Gerado na Aba 1) aqui", type=['xlsx'], key="uploader_pedidos_audit")
     with col2:
         st.subheader("2. Notas Fiscais (XML)")
         arquivos_xml = st.file_uploader("Arraste os XMLs dos Fornecedores", type=['xml'], accept_multiple_files=True, key="uploader_xmls")
@@ -422,7 +421,6 @@ with aba_auditoria:
                                         'Produto': normalizar(row[1]), 'Qtd': float(row[2]) if pd.notna(row[2]) else 0.0
                                     })
                     df_pedidos = pd.DataFrame(pedidos_lista)
-                    
                     df_pedidos = df_pedidos[~df_pedidos['Loja'].astype(str).str.upper().str.contains('5')]
                     df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
 
@@ -454,7 +452,6 @@ with aba_auditoria:
                         except Exception as e: pass
                         
                     df_notas = pd.DataFrame(notas)
-                    
                     if not df_notas.empty:
                         df_notas = df_notas[df_notas['Loja'] != 'Loja_5']
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
@@ -529,30 +526,21 @@ with aba_auditoria:
                             'id_execucao','loja','fornecedor','produto_pedido','produto_xml',
                             'qtd_pedido','qtd_nota','diferenca','status_visual','status_codigo'
                         ])
-                        
                         df_final.sort_values(by=['loja', 'fornecedor', 'produto_pedido'], inplace=True)
-                        
                         with sqlite3.connect(DB_NAME) as conn:
                             df_final.to_sql("auditoria", conn, if_exists="append", index=False)
-                        
-                        st.success("✅ Auditoria Concluída com Precisão Matemática! Baixe os relatórios abaixo:")
-                        
+                        st.success("✅ Auditoria Concluída!")
                         wb_audit = gerar_excel_auditoria(df_final)
                         out_audit = io.BytesIO()
                         wb_audit.save(out_audit)
-                        
-                        wb_dash = gerar_dashboard_operacional(id_execucao)
-                        
                         col_btn1, col_btn2 = st.columns(2)
                         with col_btn1:
                             st.download_button(label="📥 Baixar Auditoria Visual", data=out_audit.getvalue(), file_name=f"Auditoria_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                        
+                        wb_dash = gerar_dashboard_operacional(id_execucao)
                         if wb_dash:
                             out_dash = io.BytesIO()
                             wb_dash.save(out_dash)
                             with col_btn2:
                                 st.download_button(label="📊 Baixar Dashboard Operacional", data=out_dash.getvalue(), file_name=f"Dashboard_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                    else:
-                        st.error("❌ Erro no cruzamento. Nenhum dado foi processado.")
                 except Exception as e:
                     st.error(f"❌ Erro crítico: {e}")
