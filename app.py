@@ -28,14 +28,24 @@ st.title("🍎 Sistema Integrado FLV Enterprise")
 # CÉREBRO LÓGICO E TAXONOMIA
 # ==========================================================
 NAMESPACE_NFE = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
-DB_NAME = "auditoria_flv_app_v25.db" # Banco atualizado para suportar as novas colunas
+DB_NAME = "auditoria_flv_app_v25.db" 
 TOLERANCIA_DIF = 0.001
 
 def normalizar(texto):
     if pd.isna(texto) or texto is None: return ""
     texto = str(texto).upper().strip()
     texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
-    return re.sub(r'[^\w\s\.\-]', '', texto)
+    texto = re.sub(r'[^\w\s\.\-]', '', texto)
+    
+    # ==========================================
+    # 💉 VACINAS DE TAXONOMIA (EXCEÇÕES DE FORNECEDORES)
+    # ==========================================
+    if "MACA GALA GRANEL P" in texto:
+        return "MACA BABY KG"
+    if "MACA GALA PREMIUM" in texto or "TP 135" in texto:
+        return "MACA GALA KG"
+        
+    return texto
 
 def descobrir_loja(cnpj_dest, nome_dest):
     nome = normalizar(nome_dest)
@@ -177,7 +187,6 @@ def gerar_excel_auditoria(df_final):
                 row['status_visual'], row['qtd_fisico'], row['padrao_fisico'], row['status_doca']
             ])
             
-            # Colore a coluna Status NFe
             status_nfe_cell = ws.cell(row=ws.max_row, column=5)
             val_nfe = status_nfe_cell.value
             if val_nfe:
@@ -188,7 +197,6 @@ def gerar_excel_auditoria(df_final):
                 elif "⚪" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                 elif "🟣" in val_nfe: status_nfe_cell.fill = PatternFill(start_color="E4DFEC", end_color="E4DFEC", fill_type="solid")
 
-            # Colore a coluna Status Doca
             status_doca_cell = ws.cell(row=ws.max_row, column=8)
             val_doca = status_doca_cell.value
             if val_doca:
@@ -239,6 +247,7 @@ with aba_preparador:
                             if texto == 'L1': lojas_alvo['Loja_1'] = col_idx
                             elif texto == 'L2': lojas_alvo['Loja_2'] = col_idx
                             elif texto == 'L3': lojas_alvo['Loja_3'] = col_idx
+                            elif texto == 'L5': lojas_alvo['Loja_5'] = col_idx # Loja 5 reintegrada!
                             elif texto == 'L6': lojas_alvo['Loja_6'] = col_idx
                             elif texto == 'L7': lojas_alvo['Loja_7'] = col_idx
                             elif texto == 'L8': lojas_alvo['Loja_8'] = col_idx
@@ -313,7 +322,7 @@ with aba_preparador:
 
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
-                    st.success("✨ Planilha preparada! Baixe e use na Auditoria ou envie para a Doca.")
+                    st.success("✨ Planilha preparada com sucesso! Baixe e use na Auditoria ou envie para a Doca.")
                     st.download_button(label="📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 except Exception as e:
                     st.error(f"Erro: {e}")
@@ -339,7 +348,7 @@ with aba_auditoria:
         if not arquivo_excel or not arquivos_xml:
             st.warning("⚠️ Você precisa de pelo menos o Pedido e os XMLs.")
         else:
-            with st.spinner("Sexta-feira processando os 3 fluxos de dados..."):
+            with st.spinner("Sexta-feira processando os fluxos de dados de toda a rede..."):
                 criar_banco()
                 id_execucao = datetime.now().strftime("%Y%m%d%H%M%S")
 
@@ -362,7 +371,7 @@ with aba_auditoria:
                                         'Produto': normalizar(row[1]), 'Qtd': float(row[2]) if pd.notna(row[2]) else 0.0
                                     })
                     df_pedidos = pd.DataFrame(pedidos_lista)
-                    df_pedidos = df_pedidos[~df_pedidos['Loja'].astype(str).str.upper().str.contains('5')]
+                    # O Filtro que removia a Loja 5 foi retirado daqui!
                     df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
 
                     # LENDO XMLs
@@ -389,7 +398,7 @@ with aba_auditoria:
                         except: pass
                     df_notas = pd.DataFrame(notas)
                     if not df_notas.empty:
-                        df_notas = df_notas[df_notas['Loja'] != 'Loja_5']
+                        # O Filtro que removia a Loja 5 dos XMLs foi retirado daqui!
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
                     else: df_notas_agg = pd.DataFrame()
 
@@ -452,7 +461,6 @@ with aba_auditoria:
                                     pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd']))
                         pairs.sort(key=lambda x: x[0], reverse=True)
                         
-                        # 1. Produtos que bateram Pedido x XML
                         for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat in pairs:
                             if idx_ped not in matched_ped_idx and idx_xml not in matched_xml_idx:
                                 matched_ped_idx.add(idx_ped); matched_xml_idx.add(idx_xml)
@@ -471,7 +479,6 @@ with aba_auditoria:
                                         qtd_fisico, stat_doca, dif_doca = 0.0, classificar_doca(qtd_fat, 0.0), 0.0 - qtd_fat
                                 registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, dif, stat_v, stat_c, qtd_fisico, pad_fisico, stat_doca, dif_doca))
 
-                        # 2. Produtos do Pedido que não vieram na NFe
                         for idx_ped, ped in df_ped_group.iterrows():
                             if idx_ped not in matched_ped_idx:
                                 stat_v, stat_c, dif = classificar(ped['Qtd'], 0, "SEM_PRODUTO")
@@ -486,7 +493,6 @@ with aba_auditoria:
                                         qtd_fisico, stat_doca, dif_doca = 0.0, classificar_doca(0, 0.0), 0.0
                                 registros.append((id_execucao, loja, ped['Fornecedor_Original'], ped['Produto'], "❌ PRODUTO NÃO FATURADO", ped['Qtd'], 0, dif, stat_v, stat_c, qtd_fisico, pad_fisico, stat_doca, dif_doca))
                         
-                        # 3. Produtos faturados sem Pedido
                         for idx_xml, nota in notas_forn.iterrows():
                             if idx_xml not in matched_xml_idx:
                                 prod_xml, qtd_fat = nota['Produto'], nota['Qtd']
