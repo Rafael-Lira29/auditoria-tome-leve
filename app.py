@@ -398,29 +398,50 @@ with aba_auditoria:
                     else: df_notas_agg = pd.DataFrame()
 
                     # =========================================================
-                    # O NOVO LEITOR INTELIGENTE DA DOCA (BLINDADO)
+                    # O NOVO LEITOR VIDENTE DA DOCA (LÊ ATÉ ARQUIVO SEM CABEÇALHO)
                     # =========================================================
                     contagens_lista = []
                     if arquivos_contagem:
                         for f in arquivos_contagem:
                             try:
-                                if f.name.endswith('.csv'):
-                                    # Tenta ler como UTF-8 e vírgula, se falhar tenta outras combinações (Trator)
-                                    try:
-                                        df_c = pd.read_csv(f, sep=',', encoding='utf-8')
-                                    except UnicodeDecodeError:
-                                        f.seek(0)
-                                        df_c = pd.read_csv(f, sep=';', encoding='latin1')
-                                    
-                                    # Se ele leu o CSV todo grudado numa coluna só, arruma
-                                    if len(df_c.columns) <= 1:
-                                        f.seek(0)
-                                        df_c = pd.read_csv(f, sep=';', encoding='utf-8')
-                                        if len(df_c.columns) <= 1:
+                                df_c = pd.DataFrame()
+                                if f.name.lower().endswith('.csv'):
+                                    tentativas = [(',', 'utf-8'), (';', 'utf-8'), (',', 'latin1'), (';', 'latin1')]
+                                    for sep, enc in tentativas:
+                                        try:
                                             f.seek(0)
-                                            df_c = pd.read_csv(f, sep=',', encoding='latin1')
+                                            df_temp = pd.read_csv(f, sep=sep, encoding=enc)
+                                            if len(df_temp.columns) > 1:
+                                                df_c = df_temp
+                                                break
+                                        except: pass
+                                    if df_c.empty:
+                                        f.seek(0)
+                                        df_c = pd.read_csv(f)
+                                        
+                                    # --- VACINA: O LEITOR DE ARQUIVOS SEM CABEÇALHO ---
+                                    cols_str = [str(c).upper() for c in df_c.columns]
+                                    tem_cabecalho = any(any(x in c for x in ['PROD', 'DESC', 'QTD', 'FISICO', 'RECEB']) for c in cols_str)
+                                    
+                                    # Se o arquivo não tiver nenhum cabeçalho válido e tiver o tamanho certo da Doca
+                                    if not tem_cabecalho and df_c.shape[1] >= 9:
+                                        f.seek(0)
+                                        df_bruto = pd.read_csv(f, header=None)
+                                        if df_bruto.shape[1] >= 10:
+                                            df_c = df_bruto.iloc[:, 5:10].copy() # Puxa Loja, Forn, Prod, Qtd, Padrao pelas posições
+                                            df_c.columns = ['LOJA', 'FORN', 'PROD', 'QTD', 'PADR']
+                                        elif df_bruto.shape[1] == 9:
+                                            df_c = df_bruto.iloc[:, 4:9].copy()
+                                            df_c.columns = ['LOJA', 'FORN', 'PROD', 'QTD', 'PADR']
+                                # ---------------------------------------------
                                 else:
-                                    df_c = pd.read_excel(f)
+                                    # É EXCEL MULTI-ABA
+                                    todas_abas = pd.read_excel(f, sheet_name=None)
+                                    if 'Contagens' in todas_abas:
+                                        df_c = todas_abas['Contagens']
+                                    else:
+                                        abas_validas = [df for nome, df in todas_abas.items() if 'CARGA' not in str(nome).upper() and 'TEMP' not in str(nome).upper()]
+                                        df_c = pd.concat(abas_validas, ignore_index=True) if abas_validas else pd.read_excel(f)
 
                                 cols = [str(c).upper().strip() for c in df_c.columns]
                                 df_c.columns = cols
@@ -440,7 +461,6 @@ with aba_auditoria:
 
                                 if col_prod and col_qtd:
                                     for _, row in df_c.iterrows():
-                                        # Identificador Blindado de Loja
                                         loja_str = str(row[col_loja]).upper() if col_loja else loja_fallback.upper()
                                         loja_linha = loja_fallback
                                         for num in ['1','2','3','5','6','7','8']:
@@ -459,14 +479,14 @@ with aba_auditoria:
                                                 'Qtd_Fisico': float(qtd), 
                                                 'Padrao_Fisico': str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
                                             })
+                                else:
+                                    st.warning(f"⚠️ Aviso: No arquivo '{f.name}', não achei cabeçalhos de quantidade ou produto.")
                             except Exception as e:
                                 st.error(f"⚠️ Erro ao processar o arquivo {f.name}: {e}")
                                 
                     df_contagens = pd.DataFrame(contagens_lista)
                     if not df_contagens.empty:
-                        st.success(f"📦 SUCESSO ABSOLUTO: O motor processou {len(df_contagens)} registros físicos da Doca perfeitamente!")
-                    elif arquivos_contagem:
-                        st.warning("⚠️ O arquivo da Doca foi inserido, mas o sistema não encontrou nenhum dado reconhecível dentro dele.")
+                        st.success(f"📦 SUCESSO: O motor processou {len(df_contagens)} linhas contadas na Doca!")
 
                     # CRUZAMENTO TRIPLO MESTRE
                     registros = []
@@ -544,7 +564,6 @@ with aba_auditoria:
                         df_final.sort_values(by=['loja', 'fornecedor', 'produto_pedido'], inplace=True)
                         with sqlite3.connect(DB_NAME) as conn:
                             df_final.to_sql("auditoria_v2", conn, if_exists="append", index=False)
-                        st.success("✅ Auditoria Tripla Concluída com Sucesso!")
                         wb_audit = gerar_excel_auditoria(df_final)
                         out_audit = io.BytesIO()
                         wb_audit.save(out_audit)
