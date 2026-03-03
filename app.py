@@ -398,50 +398,75 @@ with aba_auditoria:
                     else: df_notas_agg = pd.DataFrame()
 
                     # =========================================================
-                    # O NOVO LEITOR INTELIGENTE DA DOCA
+                    # O NOVO LEITOR INTELIGENTE DA DOCA (BLINDADO)
                     # =========================================================
                     contagens_lista = []
                     if arquivos_contagem:
                         for f in arquivos_contagem:
                             try:
-                                if f.name.endswith('.csv'): df_c = pd.read_csv(f)
-                                else: df_c = pd.read_excel(f)
-                                
+                                if f.name.endswith('.csv'):
+                                    # Tenta ler como UTF-8 e vírgula, se falhar tenta outras combinações (Trator)
+                                    try:
+                                        df_c = pd.read_csv(f, sep=',', encoding='utf-8')
+                                    except UnicodeDecodeError:
+                                        f.seek(0)
+                                        df_c = pd.read_csv(f, sep=';', encoding='latin1')
+                                    
+                                    # Se ele leu o CSV todo grudado numa coluna só, arruma
+                                    if len(df_c.columns) <= 1:
+                                        f.seek(0)
+                                        df_c = pd.read_csv(f, sep=';', encoding='utf-8')
+                                        if len(df_c.columns) <= 1:
+                                            f.seek(0)
+                                            df_c = pd.read_csv(f, sep=',', encoding='latin1')
+                                else:
+                                    df_c = pd.read_excel(f)
+
                                 cols = [str(c).upper().strip() for c in df_c.columns]
                                 df_c.columns = cols
                                 
-                                # Encontra as colunas dinamicamente, não importa a ordem
+                                # Encontra as colunas dinamicamente
                                 col_loja = next((c for c in cols if 'LOJA' in c), None)
                                 col_forn = next((c for c in cols if 'FORN' in c), None)
                                 col_prod = next((c for c in cols if 'PROD' in c or 'DESC' in c), None)
-                                col_qtd = next((c for c in cols if 'QTD' in c or 'FÍSICO' in c or 'FISICO' in c), None)
+                                col_qtd = next((c for c in cols if 'QTD' in c or 'FÍSICO' in c or 'FISICO' in c or 'RECEB' in c), None)
                                 col_pad = next((c for c in cols if 'PADR' in c), None)
                                 
-                                # Tenta achar pelo nome do arquivo como plano B
                                 loja_fallback = "Loja_Desconhecida"
                                 for l in ['LOJA_1', 'LOJA_2', 'LOJA_3', 'LOJA_5', 'LOJA_6', 'LOJA_7', 'LOJA_8']:
                                     if l in f.name.upper():
                                         loja_fallback = l.capitalize()
                                         break
-                                
+
                                 if col_prod and col_qtd:
                                     for _, row in df_c.iterrows():
-                                        # Inteligência Nova: Lê a loja direto da coluna da Doca
-                                        loja_linha = str(row[col_loja]).strip() if col_loja and pd.notna(row[col_loja]) else loja_fallback
-                                        if "LOJA" in loja_linha.upper():
-                                            loja_linha = loja_linha.upper().replace(" ", "_").capitalize()
+                                        # Identificador Blindado de Loja
+                                        loja_str = str(row[col_loja]).upper() if col_loja else loja_fallback.upper()
+                                        loja_linha = loja_fallback
+                                        for num in ['1','2','3','5','6','7','8']:
+                                            if num in loja_str:
+                                                loja_linha = f"Loja_{num}"
+                                                break
                                         
                                         prod = normalizar(row[col_prod])
-                                        forn_macro = traduzir_fornecedor(str(row[col_forn])) if col_forn else "DESCONHECIDO"
                                         qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                                         if pd.isna(qtd): qtd = 0.0
-                                        pad = str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
                                         
                                         if prod:
-                                            contagens_lista.append({'Loja': loja_linha, 'Fornecedor_Macro': forn_macro, 'Produto': prod, 'Qtd_Fisico': float(qtd), 'Padrao_Fisico': pad})
-                            except Exception as e: 
-                                pass
+                                            contagens_lista.append({
+                                                'Loja': loja_linha, 
+                                                'Produto': prod, 
+                                                'Qtd_Fisico': float(qtd), 
+                                                'Padrao_Fisico': str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
+                                            })
+                            except Exception as e:
+                                st.error(f"⚠️ Erro ao processar o arquivo {f.name}: {e}")
+                                
                     df_contagens = pd.DataFrame(contagens_lista)
+                    if not df_contagens.empty:
+                        st.success(f"📦 SUCESSO ABSOLUTO: O motor processou {len(df_contagens)} registros físicos da Doca perfeitamente!")
+                    elif arquivos_contagem:
+                        st.warning("⚠️ O arquivo da Doca foi inserido, mas o sistema não encontrou nenhum dado reconhecível dentro dele.")
 
                     # CRUZAMENTO TRIPLO MESTRE
                     registros = []
