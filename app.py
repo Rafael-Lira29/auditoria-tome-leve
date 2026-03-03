@@ -37,9 +37,6 @@ def normalizar(texto):
     texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
     texto = re.sub(r'[^\w\s\.\-]', '', texto)
     
-    # ==========================================
-    # 💉 VACINAS DE TAXONOMIA (EXCEÇÕES DE FORNECEDORES)
-    # ==========================================
     if "MACA GALA GRANEL P" in texto:
         return "MACA BABY KG"
     if "MACA GALA PREMIUM" in texto or "TP 135" in texto:
@@ -247,7 +244,7 @@ with aba_preparador:
                             if texto == 'L1': lojas_alvo['Loja_1'] = col_idx
                             elif texto == 'L2': lojas_alvo['Loja_2'] = col_idx
                             elif texto == 'L3': lojas_alvo['Loja_3'] = col_idx
-                            elif texto == 'L5': lojas_alvo['Loja_5'] = col_idx # Loja 5 reintegrada!
+                            elif texto == 'L5': lojas_alvo['Loja_5'] = col_idx 
                             elif texto == 'L6': lojas_alvo['Loja_6'] = col_idx
                             elif texto == 'L7': lojas_alvo['Loja_7'] = col_idx
                             elif texto == 'L8': lojas_alvo['Loja_8'] = col_idx
@@ -371,7 +368,6 @@ with aba_auditoria:
                                         'Produto': normalizar(row[1]), 'Qtd': float(row[2]) if pd.notna(row[2]) else 0.0
                                     })
                     df_pedidos = pd.DataFrame(pedidos_lista)
-                    # O Filtro que removia a Loja 5 foi retirado daqui!
                     df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
 
                     # LENDO XMLs
@@ -398,20 +394,15 @@ with aba_auditoria:
                         except: pass
                     df_notas = pd.DataFrame(notas)
                     if not df_notas.empty:
-                        # O Filtro que removia a Loja 5 dos XMLs foi retirado daqui!
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
                     else: df_notas_agg = pd.DataFrame()
 
-                    # LENDO ARQUIVOS DA DOCA (OPCIONAL)
+                    # =========================================================
+                    # O NOVO LEITOR INTELIGENTE DA DOCA
+                    # =========================================================
                     contagens_lista = []
                     if arquivos_contagem:
                         for f in arquivos_contagem:
-                            nome_arq = f.name.upper()
-                            loja_cont = "Loja_Desconhecida"
-                            for l in ['LOJA_1', 'LOJA_2', 'LOJA_3', 'LOJA_5', 'LOJA_6', 'LOJA_7', 'LOJA_8']:
-                                if l in nome_arq:
-                                    loja_cont = l.capitalize()
-                                    break
                             try:
                                 if f.name.endswith('.csv'): df_c = pd.read_csv(f)
                                 else: df_c = pd.read_excel(f)
@@ -419,21 +410,37 @@ with aba_auditoria:
                                 cols = [str(c).upper().strip() for c in df_c.columns]
                                 df_c.columns = cols
                                 
+                                # Encontra as colunas dinamicamente, não importa a ordem
+                                col_loja = next((c for c in cols if 'LOJA' in c), None)
                                 col_forn = next((c for c in cols if 'FORN' in c), None)
                                 col_prod = next((c for c in cols if 'PROD' in c or 'DESC' in c), None)
                                 col_qtd = next((c for c in cols if 'QTD' in c or 'FÍSICO' in c or 'FISICO' in c), None)
                                 col_pad = next((c for c in cols if 'PADR' in c), None)
                                 
+                                # Tenta achar pelo nome do arquivo como plano B
+                                loja_fallback = "Loja_Desconhecida"
+                                for l in ['LOJA_1', 'LOJA_2', 'LOJA_3', 'LOJA_5', 'LOJA_6', 'LOJA_7', 'LOJA_8']:
+                                    if l in f.name.upper():
+                                        loja_fallback = l.capitalize()
+                                        break
+                                
                                 if col_prod and col_qtd:
                                     for _, row in df_c.iterrows():
+                                        # Inteligência Nova: Lê a loja direto da coluna da Doca
+                                        loja_linha = str(row[col_loja]).strip() if col_loja and pd.notna(row[col_loja]) else loja_fallback
+                                        if "LOJA" in loja_linha.upper():
+                                            loja_linha = loja_linha.upper().replace(" ", "_").capitalize()
+                                        
                                         prod = normalizar(row[col_prod])
                                         forn_macro = traduzir_fornecedor(str(row[col_forn])) if col_forn else "DESCONHECIDO"
                                         qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                                         if pd.isna(qtd): qtd = 0.0
                                         pad = str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
+                                        
                                         if prod:
-                                            contagens_lista.append({'Loja': loja_cont, 'Fornecedor_Macro': forn_macro, 'Produto': prod, 'Qtd_Fisico': float(qtd), 'Padrao_Fisico': pad})
-                            except: pass
+                                            contagens_lista.append({'Loja': loja_linha, 'Fornecedor_Macro': forn_macro, 'Produto': prod, 'Qtd_Fisico': float(qtd), 'Padrao_Fisico': pad})
+                            except Exception as e: 
+                                pass
                     df_contagens = pd.DataFrame(contagens_lista)
 
                     # CRUZAMENTO TRIPLO MESTRE
@@ -457,6 +464,7 @@ with aba_auditoria:
                                 for rw in ["MELANCIA", "BATATA", "CEBOLA", "ALHO"]:
                                     if rw in fam_ampla_ped or rw in fam_ampla_xml:
                                         fam_ampla_ped, fam_ampla_xml = fam_ped, fam_xml
+                                        break
                                 if fam_ped == fam_xml or fam_ampla_ped == fam_ampla_xml:
                                     pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd']))
                         pairs.sort(key=lambda x: x[0], reverse=True)
