@@ -398,7 +398,7 @@ with aba_auditoria:
                     else: df_notas_agg = pd.DataFrame()
 
                     # =========================================================
-                    # O NOVO LEITOR VIDENTE DA DOCA (LÊ ATÉ ARQUIVO SEM CABEÇALHO)
+                    # LEITOR VIDENTE DA DOCA COM ESCUDO ANTI-DUPLICIDADE
                     # =========================================================
                     contagens_lista = []
                     if arquivos_contagem:
@@ -419,23 +419,19 @@ with aba_auditoria:
                                         f.seek(0)
                                         df_c = pd.read_csv(f)
                                         
-                                    # --- VACINA: O LEITOR DE ARQUIVOS SEM CABEÇALHO ---
                                     cols_str = [str(c).upper() for c in df_c.columns]
                                     tem_cabecalho = any(any(x in c for x in ['PROD', 'DESC', 'QTD', 'FISICO', 'RECEB']) for c in cols_str)
                                     
-                                    # Se o arquivo não tiver nenhum cabeçalho válido e tiver o tamanho certo da Doca
                                     if not tem_cabecalho and df_c.shape[1] >= 9:
                                         f.seek(0)
                                         df_bruto = pd.read_csv(f, header=None)
                                         if df_bruto.shape[1] >= 10:
-                                            df_c = df_bruto.iloc[:, 5:10].copy() # Puxa Loja, Forn, Prod, Qtd, Padrao pelas posições
+                                            df_c = df_bruto.iloc[:, 5:10].copy() 
                                             df_c.columns = ['LOJA', 'FORN', 'PROD', 'QTD', 'PADR']
                                         elif df_bruto.shape[1] == 9:
                                             df_c = df_bruto.iloc[:, 4:9].copy()
                                             df_c.columns = ['LOJA', 'FORN', 'PROD', 'QTD', 'PADR']
-                                # ---------------------------------------------
                                 else:
-                                    # É EXCEL MULTI-ABA
                                     todas_abas = pd.read_excel(f, sheet_name=None)
                                     if 'Contagens' in todas_abas:
                                         df_c = todas_abas['Contagens']
@@ -446,7 +442,6 @@ with aba_auditoria:
                                 cols = [str(c).upper().strip() for c in df_c.columns]
                                 df_c.columns = cols
                                 
-                                # Encontra as colunas dinamicamente
                                 col_loja = next((c for c in cols if 'LOJA' in c), None)
                                 col_forn = next((c for c in cols if 'FORN' in c), None)
                                 col_prod = next((c for c in cols if 'PROD' in c or 'DESC' in c), None)
@@ -468,6 +463,7 @@ with aba_auditoria:
                                                 loja_linha = f"Loja_{num}"
                                                 break
                                         
+                                        forn_fisico = str(row[col_forn]).strip() if col_forn and pd.notna(row[col_forn]) else "DESCONHECIDO"
                                         prod = normalizar(row[col_prod])
                                         qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                                         if pd.isna(qtd): qtd = 0.0
@@ -475,6 +471,7 @@ with aba_auditoria:
                                         if prod:
                                             contagens_lista.append({
                                                 'Loja': loja_linha, 
+                                                'Fornecedor': forn_fisico,
                                                 'Produto': prod, 
                                                 'Qtd_Fisico': float(qtd), 
                                                 'Padrao_Fisico': str(row[col_pad]) if col_pad and pd.notna(row[col_pad]) else ""
@@ -486,7 +483,15 @@ with aba_auditoria:
                                 
                     df_contagens = pd.DataFrame(contagens_lista)
                     if not df_contagens.empty:
-                        st.success(f"📦 SUCESSO: O motor processou {len(df_contagens)} linhas contadas na Doca!")
+                        # --- O ESCUDO ANTI-DUPLICIDADE ATIVADO ---
+                        tamanho_original = len(df_contagens)
+                        df_contagens = df_contagens.drop_duplicates(subset=['Loja', 'Fornecedor', 'Produto'], keep='last')
+                        linhas_removidas = tamanho_original - len(df_contagens)
+                        
+                        msg_sucesso = f"📦 SUCESSO: O motor processou {len(df_contagens)} linhas da Doca definitivas!"
+                        if linhas_removidas > 0:
+                            msg_sucesso += f" (♻️ {linhas_removidas} contagens antigas/duplicadas foram ignoradas)"
+                        st.success(msg_sucesso)
 
                     # CRUZAMENTO TRIPLO MESTRE
                     registros = []
