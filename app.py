@@ -82,6 +82,12 @@ def classificar(qtd_ped, qtd_fat, tipo):
     if diferenca < 0: return (f"🔴 NFe FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
     return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
 
+def classificar_doca(qtd_xml, qtd_fisico):
+    diferenca = qtd_fisico - qtd_xml
+    if abs(diferenca) < TOLERANCIA_DIF: return "🟢 FÍSICO BATEU"
+    if diferenca < 0: return f"🔴 FÍSICO FALTOU {abs(diferenca):.2f}".replace('.00','')
+    return f"🟡 FÍSICO SOBROU {diferenca:.2f}".replace('.00','')
+
 def analisar_com_ia(produto, diferenca_negativa, texto_infcpl):
     if not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, "IA Desligada/Sem Chave"
     if not texto_infcpl or len(texto_infcpl.strip()) < 5: return False, ""
@@ -130,7 +136,7 @@ def gerar_excel_auditoria(df_final):
                 row['status_visual'], row.get('justificativa_ia', ''), row['qtd_fisico'], row['padrao_fisico'], row['status_doca']
             ])
             
-            # Cores
+            # Formatação de Cores da Auditoria
             status_nfe_cell = ws.cell(row=ws.max_row, column=6)
             val_nfe = status_nfe_cell.value
             if val_nfe:
@@ -142,7 +148,7 @@ def gerar_excel_auditoria(df_final):
 
         ws.column_dimensions['A'].width = 30
         ws.column_dimensions['C'].width = 30
-        ws.column_dimensions['E'].width = 15 # Origem
+        ws.column_dimensions['E'].width = 15 
         ws.column_dimensions['F'].width = 25
         ws.column_dimensions['G'].width = 35 
         ws.column_dimensions['J'].width = 25
@@ -153,9 +159,116 @@ def gerar_excel_auditoria(df_final):
 # ==========================================================
 aba_preparador, aba_auditoria = st.tabs(["🧹 1. Preparador de Pedidos", "🍎 2. Auditoria 3 Vias (NFe x Doca)"])
 
-# (Aba 1 - Omitida aqui visualmente, você pode colar a sua lógica da Aba 1 se quiser, 
-#  mas foque na Aba 2 que é onde a mágica nova acontece)
+# ----------------------------------------------------------
+# TELA 1: PREPARADOR DE PLANILHA DO COMPRADOR
+# ----------------------------------------------------------
+with aba_preparador:
+    st.header("🧹 Preparador de Planilha do Comprador")
+    arquivo_bruto = st.file_uploader("Arraste a Planilha Bruta (CSV ou Excel)", type=['csv', 'xlsx'], key="uploader_bruto")
+    if st.button("Limpar e Preparar Planilha"):
+        if not arquivo_bruto:
+            st.warning("Envie a planilha bruta primeiro.")
+        else:
+            with st.spinner("Lendo estrutura e blindando..."):
+                try:
+                    nome_planilha = arquivo_bruto.name
+                    if nome_planilha.endswith('.csv'):
+                        df_bruto = pd.read_csv(arquivo_bruto, header=None)
+                    else:
+                        todas_as_abas = pd.read_excel(arquivo_bruto, sheet_name=None, header=None)
+                        abas_validas = [df for n, df in todas_as_abas.items() if str(n).lower() not in ['ped', 'com', 'sis'] and not str(n).isdigit()]
+                        df_bruto = pd.concat(abas_validas, ignore_index=True) if abas_validas else pd.read_excel(arquivo_bruto, header=None)
 
+                    lojas_alvo, coluna_padrao, coluna_custo = {}, -1, -1
+                    for index, row in df_bruto.head(50).iterrows():
+                        for col_idx, val in enumerate(row):
+                            texto = str(val).strip().upper()
+                            if texto == 'L1': lojas_alvo['Loja_1'] = col_idx
+                            elif texto == 'L2': lojas_alvo['Loja_2'] = col_idx
+                            elif texto == 'L3': lojas_alvo['Loja_3'] = col_idx
+                            elif texto == 'L5': lojas_alvo['Loja_5'] = col_idx 
+                            elif texto == 'L6': lojas_alvo['Loja_6'] = col_idx
+                            elif texto == 'L7': lojas_alvo['Loja_7'] = col_idx
+                            elif texto == 'L8': lojas_alvo['Loja_8'] = col_idx
+                            elif 'PADRÃO' in texto or 'PADRAO' in texto: coluna_padrao = col_idx
+                            elif 'CUSTO' in texto: coluna_custo = col_idx
+                        if lojas_alvo: break
+
+                    max_col = df_bruto.shape[1]
+                    if coluna_padrao == -1: coluna_padrao = 10 if max_col > 10 else (max_col - 1)
+                    if coluna_custo == -1: coluna_custo = 11 if max_col > 11 else (max_col - 1)
+
+                    fornecedor_atual, cod_fornecedor_atual = "DESCONHECIDO", "-"
+                    lista_fornecedores, lista_codigos = [], []
+                    for index, row in df_bruto.iterrows():
+                        col0_str, col1_str = str(row[0]).strip().upper(), str(row[1]).strip()
+                        if "PEDIDO FLV" in col0_str:
+                            nome_sujo = col0_str.replace("PEDIDO FLV", "").split("202")[0].replace(",", "").strip()
+                            fornecedor_atual = nome_sujo if nome_sujo else "FORNECEDOR"
+                        elif "CÓD" in col0_str and "FORN" in col0_str:
+                            cod_fornecedor_atual = col1_str
+                        lista_fornecedores.append(fornecedor_atual)
+                        lista_codigos.append(cod_fornecedor_atual)
+
+                    df_bruto['Fornecedor'] = lista_fornecedores
+                    df_bruto['Cod_Fornecedor'] = lista_codigos
+                    df_bruto[0] = pd.to_numeric(df_bruto[0], errors='coerce')
+                    df_dados = df_bruto.dropna(subset=[0]).copy()
+                    df_dados[0] = df_dados[0].astype(int)
+
+                    wb = Workbook()
+                    wb.remove(wb.active)
+                    fill_loja = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+                    font_loja = Font(color="FFFFFF", bold=True, size=14)
+                    fill_fornecedor = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+                    font_fornecedor = Font(color="002060", bold=True, size=11)
+
+                    for nome_loja, indice_coluna in lojas_alvo.items():
+                        if indice_coluna >= max_col: continue
+                        df_loja = df_dados[[0, 1, 'Cod_Fornecedor', 'Fornecedor', indice_coluna, coluna_padrao, coluna_custo]].copy()
+                        df_loja.columns = ['Código', 'Descrição', 'Cod_Fornecedor', 'Fornecedor', 'Qtd_Pedida', 'Padrão_Cx', 'Custo']
+                        df_loja['Qtd_Pedida'] = pd.to_numeric(df_loja['Qtd_Pedida'], errors='coerce')
+                        df_loja['Custo'] = pd.to_numeric(df_loja['Custo'], errors='coerce').fillna(0)
+                        df_loja = df_loja[df_loja['Qtd_Pedida'] > 0]
+
+                        if df_loja.empty: continue
+                        df_loja = df_loja.sort_values(by=['Fornecedor', 'Descrição'])
+                        ws = wb.create_sheet(title=nome_loja)
+                        ws.append([f"CONFERÊNCIA - {nome_loja.upper().replace('_', ' ')}"])
+                        ws.merge_cells('A1:E1')
+                        ws['A1'].fill = fill_loja
+                        ws['A1'].font = font_loja
+                        ws.append(['Código', 'Descrição', 'Qtd_Pedida', 'Padrão_Cx', 'Custo'])
+                        for cell in ws[2]: cell.font = Font(bold=True)
+
+                        current_forn = None
+                        for _, row in df_loja.iterrows():
+                            if row['Fornecedor'] != current_forn:
+                                if current_forn is not None: ws.append([])
+                                current_forn = row['Fornecedor']
+                                cod_forn = row['Cod_Fornecedor']
+                                ws.append([f"Fornecedor: {cod_forn} - {current_forn}", "", "", "", ""])
+                                row_idx = ws.max_row
+                                ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+                                for cell in ws[row_idx]:
+                                    cell.fill = fill_fornecedor
+                                    cell.font = font_fornecedor
+                            ws.append([row['Código'], row['Descrição'], row['Qtd_Pedida'], row['Padrão_Cx'], row['Custo']])
+                            ws.cell(row=ws.max_row, column=5).number_format = 'R$ #,##0.00'
+
+                        ws.column_dimensions['B'].width = 45
+                        for c in ['A','C','D','E']: ws.column_dimensions[c].width = 15
+
+                    out_excel = io.BytesIO()
+                    wb.save(out_excel)
+                    st.success("✨ Planilha preparada com sucesso! Baixe e use na Auditoria ou envie para a Doca.")
+                    st.download_button(label="📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                except Exception as e:
+                    st.error(f"Erro no Preparador: {e}")
+
+# ----------------------------------------------------------
+# TELA 2: AUDITORIA 3 VIAS COM DE-PARA
+# ----------------------------------------------------------
 with aba_auditoria:
     st.header("🍎 Cruzamento Triplo com Dicionário De-Para")
     
@@ -253,7 +366,6 @@ with aba_auditoria:
                                 cod_xml = cod_node.text.strip() if cod_node is not None else ""
                                 qtd_xml = float(qtd_node.text)
 
-                                # 🌟 A MÁGICA DA TRADUÇÃO E CONVERSÃO 🌟
                                 origem_match = "XML (Fuzzy)"
                                 nome_final = normalizar(nome_xml)
                                 qtd_final = qtd_xml
@@ -269,11 +381,10 @@ with aba_auditoria:
                     
                     df_notas = pd.DataFrame(notas)
                     if not df_notas.empty:
-                        # Agora agrupamos usando a origem (priorizando o De-Para)
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto', 'Origem'], as_index=False)['Qtd'].sum()
                     else: df_notas_agg = pd.DataFrame()
 
-                    df_contagens = pd.DataFrame() # Simplificado para caber (Lógica de doca mantida em sua versão)
+                    df_contagens = pd.DataFrame() # Simplificado na visualização, você pode recolocar sua leitura de Doca aqui
                     
                     # --- CRUZAMENTO MESTRE ---
                     registros = []
@@ -293,7 +404,6 @@ with aba_auditoria:
                                 for idx_xml, nota in notas_forn.iterrows():
                                     pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd'], nota['Origem']))
                             
-                            # O De-Para garante score 100, então ele sempre cruza primeiro!
                             pairs.sort(key=lambda x: x[0], reverse=True) 
                             
                             for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat, origem_m in pairs:
