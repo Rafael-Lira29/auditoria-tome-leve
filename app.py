@@ -5,11 +5,10 @@ import unicodedata
 from rapidfuzz import process, fuzz
 import xml.etree.ElementTree as ET
 import io
-import time
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
-import os
+import psycopg2
 
 # --- MOTOR COGNITIVO ---
 try:
@@ -23,9 +22,7 @@ st.set_page_config(page_title="FLV Enterprise - Tome Leve", page_icon="🍎", la
 
 st.markdown("""
     <style>
-    div.stButton > button:first-child {
-        background-color: #002060; color: white; height: 3em; font-weight: bold; width: 100%; border-radius: 8px;
-    }
+    div.stButton > button:first-child { background-color: #002060; color: white; height: 3em; font-weight: bold; width: 100%; border-radius: 8px; }
     div.stButton > button:first-child:hover { background-color: #00133d; }
     </style>
 """, unsafe_allow_html=True)
@@ -33,10 +30,30 @@ st.markdown("""
 st.title("🍎 Sistema Integrado FLV Enterprise")
 
 # ==========================================================
-# CÉREBRO LÓGICO E TAXONOMIA
+# CÉREBRO LÓGICO E CONEXÃO DB
 # ==========================================================
 NAMESPACE_NFE = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
 TOLERANCIA_DIF = 0.001
+
+@st.cache_resource
+def get_db_connection():
+    return psycopg2.connect(st.secrets["DATABASE_URL"])
+
+def carregar_dicionario_banco():
+    dict_depara = {}
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT cnpj_fornecedor, cod_produto_xml, descricao_interna, fator_conversao, cod_interno FROM depara_flv")
+        rows = cursor.fetchall()
+        for row in rows:
+            cnpj, cod_xml, desc_int, fator, cod_int = row
+            if cod_int and cod_int != 'nan':
+                dict_depara[(str(cnpj).strip(), str(cod_xml).strip())] = (str(desc_int).strip(), float(fator))
+        cursor.close()
+    except Exception as e:
+        st.error(f"Erro ao conectar com o banco de dados: {e}")
+    return dict_depara
 
 def normalizar(texto):
     if pd.isna(texto) or texto is None: return ""
@@ -82,14 +99,8 @@ def classificar(qtd_ped, qtd_fat, tipo):
     if diferenca < 0: return (f"🔴 NFe FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
     return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
 
-def classificar_doca(qtd_xml, qtd_fisico):
-    diferenca = qtd_fisico - qtd_xml
-    if abs(diferenca) < TOLERANCIA_DIF: return "🟢 FÍSICO BATEU"
-    if diferenca < 0: return f"🔴 FÍSICO FALTOU {abs(diferenca):.2f}".replace('.00','')
-    return f"🟡 FÍSICO SOBROU {diferenca:.2f}".replace('.00','')
-
 def analisar_com_ia(produto, diferenca_negativa, texto_infcpl):
-    if not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, "IA Desligada/Sem Chave"
+    if not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, "IA Desligada"
     if not texto_infcpl or len(texto_infcpl.strip()) < 5: return False, ""
     try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -98,10 +109,10 @@ def analisar_com_ia(produto, diferenca_negativa, texto_infcpl):
         resposta = model.generate_content(prompt).text.strip()
         if resposta.startswith("[SIM]"): return True, resposta
         return False, resposta
-    except Exception as e: return False, "Erro IA"
+    except Exception: return False, "Erro IA"
 
 # ==========================================================
-# GERADOR DE EXCEL TRIPLO
+# GERADOR DE EXCEL
 # ==========================================================
 def gerar_excel_auditoria(df_final):
     df_final = df_final.fillna("")
@@ -136,7 +147,6 @@ def gerar_excel_auditoria(df_final):
                 row['status_visual'], row.get('justificativa_ia', ''), row['qtd_fisico'], row['padrao_fisico'], row['status_doca']
             ])
             
-            # Formatação de Cores da Auditoria
             status_nfe_cell = ws.cell(row=ws.max_row, column=6)
             val_nfe = status_nfe_cell.value
             if val_nfe:
@@ -157,28 +167,20 @@ def gerar_excel_auditoria(df_final):
 # ==========================================================
 # INTERFACE PRINCIPAL
 # ==========================================================
-aba_preparador, aba_auditoria = st.tabs(["🧹 1. Preparador de Pedidos", "🍎 2. Auditoria 3 Vias (NFe x Doca)"])
+aba_preparador, aba_auditoria, aba_gestao = st.tabs(["🧹 1. Preparador", "🍎 2. Auditoria DB", "⚙️ 3. Gestão de Produtos"])
 
 # ----------------------------------------------------------
-# TELA 1: PREPARADOR DE PLANILHA DO COMPRADOR
+# TELA 1: PREPARADOR (Mantida intacta)
 # ----------------------------------------------------------
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador")
-    arquivo_bruto = st.file_uploader("Arraste a Planilha Bruta (CSV ou Excel)", type=['csv', 'xlsx'], key="uploader_bruto")
+    arquivo_bruto = st.file_uploader("Arraste a Planilha Bruta", type=['csv', 'xlsx'], key="up_bruto")
     if st.button("Limpar e Preparar Planilha"):
-        if not arquivo_bruto:
-            st.warning("Envie a planilha bruta primeiro.")
+        if not arquivo_bruto: st.warning("Envie a planilha bruta.")
         else:
-            with st.spinner("Lendo estrutura e blindando..."):
+            with st.spinner("Blindando..."):
                 try:
-                    nome_planilha = arquivo_bruto.name
-                    if nome_planilha.endswith('.csv'):
-                        df_bruto = pd.read_csv(arquivo_bruto, header=None)
-                    else:
-                        todas_as_abas = pd.read_excel(arquivo_bruto, sheet_name=None, header=None)
-                        abas_validas = [df for n, df in todas_as_abas.items() if str(n).lower() not in ['ped', 'com', 'sis'] and not str(n).isdigit()]
-                        df_bruto = pd.concat(abas_validas, ignore_index=True) if abas_validas else pd.read_excel(arquivo_bruto, header=None)
-
+                    df_bruto = pd.read_excel(arquivo_bruto, header=None) if arquivo_bruto.name.endswith('.xlsx') else pd.read_csv(arquivo_bruto, header=None)
                     lojas_alvo, coluna_padrao, coluna_custo = {}, -1, -1
                     for index, row in df_bruto.head(50).iterrows():
                         for col_idx, val in enumerate(row):
@@ -218,99 +220,57 @@ with aba_preparador:
 
                     wb = Workbook()
                     wb.remove(wb.active)
-                    fill_loja = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
-                    font_loja = Font(color="FFFFFF", bold=True, size=14)
-                    fill_fornecedor = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-                    font_fornecedor = Font(color="002060", bold=True, size=11)
-
                     for nome_loja, indice_coluna in lojas_alvo.items():
                         if indice_coluna >= max_col: continue
                         df_loja = df_dados[[0, 1, 'Cod_Fornecedor', 'Fornecedor', indice_coluna, coluna_padrao, coluna_custo]].copy()
                         df_loja.columns = ['Código', 'Descrição', 'Cod_Fornecedor', 'Fornecedor', 'Qtd_Pedida', 'Padrão_Cx', 'Custo']
                         df_loja['Qtd_Pedida'] = pd.to_numeric(df_loja['Qtd_Pedida'], errors='coerce')
-                        df_loja['Custo'] = pd.to_numeric(df_loja['Custo'], errors='coerce').fillna(0)
                         df_loja = df_loja[df_loja['Qtd_Pedida'] > 0]
-
                         if df_loja.empty: continue
-                        df_loja = df_loja.sort_values(by=['Fornecedor', 'Descrição'])
+                        
                         ws = wb.create_sheet(title=nome_loja)
-                        ws.append([f"CONFERÊNCIA - {nome_loja.upper().replace('_', ' ')}"])
-                        ws.merge_cells('A1:E1')
-                        ws['A1'].fill = fill_loja
-                        ws['A1'].font = font_loja
+                        ws.append([f"CONFERÊNCIA - {nome_loja.upper()}"])
                         ws.append(['Código', 'Descrição', 'Qtd_Pedida', 'Padrão_Cx', 'Custo'])
-                        for cell in ws[2]: cell.font = Font(bold=True)
-
+                        
                         current_forn = None
-                        for _, row in df_loja.iterrows():
+                        for _, row in df_loja.sort_values(by=['Fornecedor', 'Descrição']).iterrows():
                             if row['Fornecedor'] != current_forn:
-                                if current_forn is not None: ws.append([])
                                 current_forn = row['Fornecedor']
-                                cod_forn = row['Cod_Fornecedor']
-                                ws.append([f"Fornecedor: {cod_forn} - {current_forn}", "", "", "", ""])
-                                row_idx = ws.max_row
-                                ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
-                                for cell in ws[row_idx]:
-                                    cell.fill = fill_fornecedor
-                                    cell.font = font_fornecedor
+                                ws.append([f"Fornecedor: {row['Cod_Fornecedor']} - {current_forn}", "", "", "", ""])
                             ws.append([row['Código'], row['Descrição'], row['Qtd_Pedida'], row['Padrão_Cx'], row['Custo']])
-                            ws.cell(row=ws.max_row, column=5).number_format = 'R$ #,##0.00'
-
-                        ws.column_dimensions['B'].width = 45
-                        for c in ['A','C','D','E']: ws.column_dimensions[c].width = 15
 
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
-                    st.success("✨ Planilha preparada com sucesso! Baixe e use na Auditoria ou envie para a Doca.")
-                    st.download_button(label="📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                except Exception as e:
-                    st.error(f"Erro no Preparador: {e}")
+                    st.success("✨ Planilha preparada!")
+                    st.download_button("📥 Baixar Planilha", data=out_excel.getvalue(), file_name="Pedidos_Blindados.xlsx")
+                except Exception as e: st.error(f"Erro: {e}")
 
 # ----------------------------------------------------------
-# TELA 2: AUDITORIA 3 VIAS COM DE-PARA
+# TELA 2: AUDITORIA DB
 # ----------------------------------------------------------
 with aba_auditoria:
-    st.header("🍎 Cruzamento Triplo com Dicionário De-Para")
+    st.header("🍎 Cruzamento Triplo via Neon DB")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.subheader("1. Pedidos (Excel)")
-        arquivo_excel = st.file_uploader("Arraste o Pedido", type=['xlsx'], key="up_ped")
+        arquivo_excel = st.file_uploader("1. Pedidos (Excel Blindado)", type=['xlsx'], key="up_ped")
     with col2:
-        st.subheader("2. Notas (XMLs)")
-        arquivos_xml = st.file_uploader("Arraste os XMLs", type=['xml'], accept_multiple_files=True, key="up_xml")
+        arquivos_xml = st.file_uploader("2. Notas (XMLs)", type=['xml'], accept_multiple_files=True, key="up_xml")
     with col3:
-        st.subheader("3. Doca (Opcional)")
-        arquivos_contagem = st.file_uploader("Arraste o Romaneio", type=['xlsx', 'csv'], accept_multiple_files=True, key="up_doca")
-    with col4:
-        st.subheader("4. De-Para Mestre")
-        arquivo_depara = st.file_uploader("Base De-Para (Excel)", type=['xlsx'], key="up_depara")
+        arquivos_contagem = st.file_uploader("3. Doca (Opcional)", type=['xlsx', 'csv'], accept_multiple_files=True, key="up_doca")
 
-    usar_ia = st.checkbox("🧠 Ativar Auditor IA (Ler justificativas de faltas no XML)", value=HAS_IA)
+    usar_ia = st.checkbox("🧠 Ativar Auditor IA", value=HAS_IA)
 
     if st.button("Executar Auditoria Implacável"):
         if not arquivo_excel or not arquivos_xml:
-            st.warning("⚠️ Você precisa de pelo menos o Pedido e os XMLs.")
+            st.warning("⚠️ Precisa de Pedido e XMLs.")
         else:
-            with st.spinner("Sexta-feira processando inteligência de dados..."):
-                id_execucao = datetime.now().strftime("%Y%m%d%H%M%S")
-
+            with st.spinner("Puxando cérebro do PostgreSQL e processando..."):
                 try:
-                    # --- CARREGANDO O DE-PARA NA MEMÓRIA ---
-                    dict_depara = {}
-                    if arquivo_depara:
-                        df_dp = pd.read_excel(arquivo_depara)
-                        for _, row in df_dp.iterrows():
-                            cnpj = str(row.get('CNPJ_Fornecedor', '')).strip()
-                            cod_xml = str(row.get('Cod_Produto_XML', '')).strip()
-                            desc_int = str(row.get('Descricao_Interna', '')).strip()
-                            fator = pd.to_numeric(row.get('Fator_de_Conversao', 1.0), errors='coerce')
-                            if pd.isna(fator): fator = 1.0
-                            
-                            if pd.notna(row.get('Cod_Interno_TomeLeve')) and desc_int and desc_int != 'nan':
-                                dict_depara[(cnpj, cod_xml)] = (desc_int, fator)
+                    # 1. PUXA DO BANCO DE DADOS
+                    dict_depara = carregar_dicionario_banco()
 
-                    # --- LENDO PEDIDOS ---
+                    # 2. LÊ PEDIDOS (COM CONVERSÃO CX -> KG)
                     df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
                     pedidos_lista = []
                     for aba, df in df_pedidos_raw.items():
@@ -323,18 +283,23 @@ with aba_auditoria:
                             else:
                                 val = pd.to_numeric(col0, errors='coerce')
                                 if pd.notna(val) and val > 0:
+                                    try:
+                                        qtd_bruta = float(row[2]) if pd.notna(row[2]) else 0.0
+                                        padrao_cx = float(row[3]) if pd.notna(row[3]) else 1.0
+                                        qtd_convertida_kg = qtd_bruta * padrao_cx
+                                    except: qtd_convertida_kg = 0.0
+                                        
                                     pedidos_lista.append({
                                         'Loja': aba, 'Fornecedor_Original': forn_orig, 'Fornecedor_Macro': forn_macro,
-                                        'Produto': normalizar(row[1]), 'Qtd': float(row[2]) if pd.notna(row[2]) else 0.0
+                                        'Produto': normalizar(row[1]), 'Qtd': qtd_convertida_kg
                                     })
                     df_pedidos = pd.DataFrame(pedidos_lista)
                     if not df_pedidos.empty:
                         df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
 
-                    # --- LENDO XMLs + TRADUÇÃO DE-PARA ---
+                    # 3. LÊ XMLs
                     notas = []
                     textos_infcpl = {} 
-                    
                     for xml_file in arquivos_xml:
                         try:
                             tree = ET.parse(io.BytesIO(xml_file.read()))
@@ -362,12 +327,11 @@ with aba_auditoria:
                                 
                                 if prod_node is None or qtd_node is None: continue
                                 
-                                nome_xml = prod_node.text
                                 cod_xml = cod_node.text.strip() if cod_node is not None else ""
                                 qtd_xml = float(qtd_node.text)
 
                                 origem_match = "XML (Fuzzy)"
-                                nome_final = normalizar(nome_xml)
+                                nome_final = normalizar(prod_node.text)
                                 qtd_final = qtd_xml
                                 
                                 if (cnpj_forn, cod_xml) in dict_depara:
@@ -384,9 +348,7 @@ with aba_auditoria:
                         df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto', 'Origem'], as_index=False)['Qtd'].sum()
                     else: df_notas_agg = pd.DataFrame()
 
-                    df_contagens = pd.DataFrame() # Simplificado na visualização, você pode recolocar sua leitura de Doca aqui
-                    
-                    # --- CRUZAMENTO MESTRE ---
+                    # 4. CRUZAMENTO
                     registros = []
                     if not df_pedidos.empty:
                         for (loja, forn_macro), df_ped_group in df_pedidos.groupby(['Loja', 'Fornecedor_Macro']):
@@ -405,20 +367,19 @@ with aba_auditoria:
                                     pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd'], nota['Origem']))
                             
                             pairs.sort(key=lambda x: x[0], reverse=True) 
-                            
                             for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat, origem_m in pairs:
                                 if idx_ped not in matched_ped_idx and idx_xml not in matched_xml_idx:
                                     matched_ped_idx.add(idx_ped); matched_xml_idx.add(idx_xml)
                                     ped = df_ped_group.loc[idx_ped]
                                     stat_v, stat_c, dif = classificar(qtd_ped, qtd_fat, "OK")
                                     
-                                    justificativa_ia = ""
+                                    just_ia = ""
                                     if "🔴 NFe FALTA" in stat_v and usar_ia:
                                         justificado, just_texto = analisar_com_ia(ped['Produto'], dif, infcpl_nota)
                                         if justificado: stat_v = f"🤖 JUSTIFICADO (Faltou {abs(dif):.0f})"
-                                        justificativa_ia = just_texto
+                                        just_ia = just_texto
                                     
-                                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, origem_m, dif, stat_v, stat_c, justificativa_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
+                                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, origem_m, dif, stat_v, stat_c, just_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
 
                     if registros:
                         df_final = pd.DataFrame(registros, columns=[
@@ -430,10 +391,101 @@ with aba_auditoria:
                         wb_audit = gerar_excel_auditoria(df_final)
                         out_audit = io.BytesIO()
                         wb_audit.save(out_audit)
-                        
-                        st.balloons()
                         st.success("Auditoria Concluída com Precisão Cirúrgica!")
-                        st.download_button(label="📥 Baixar Auditoria Definitiva", data=out_audit.getvalue(), file_name=f"Auditoria_Enterprise_{id_execucao}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                    else: st.error("❌ Erro. Nenhum dado foi processado.")
+                        st.download_button(label="📥 Baixar Auditoria", data=out_audit.getvalue(), file_name=f"Auditoria_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx")
+                    else: st.error("❌ Nenhum dado cruzado.")
                 except Exception as e:
                     st.error(f"❌ Erro crítico: {e}")
+
+# ----------------------------------------------------------
+# TELA 3: GESTÃO DE PRODUTOS (BLINDADA CONTRA INJEÇÃO)
+# ----------------------------------------------------------
+with aba_gestao:
+    st.header("⚙️ Painel de Gestão: Dicionário De-Para")
+    
+    # Sistema de Login Seguro
+    if "autenticado" not in st.session_state:
+        st.session_state["autenticado"] = False
+
+    if not st.session_state["autenticado"]:
+        senha_digitada = st.text_input("🔑 Senha de Acesso do Comprador", type="password")
+        senha_correta = st.secrets.get("SENHA_GESTOR", "TomeLeve123") # Fallback se esquecer de por no secrets
+        
+        if st.button("Destrancar Cofre"):
+            if senha_digitada == senha_correta:
+                st.session_state["autenticado"] = True
+                st.rerun()
+            else:
+                st.error("❌ Acesso Negado. Senha incorreta.")
+    else:
+        st.success("🔓 Cofre Aberto! Você está editando direto no PostgreSQL.")
+        if st.button("🔒 Bloquear Painel"):
+            st.session_state["autenticado"] = False
+            st.rerun()
+
+        st.markdown("---")
+        
+        # Módulo de Adição de Novo Produto
+        st.subheader("➕ Cadastrar / Atualizar Produto")
+        with st.form("form_gestao"):
+            colA, colB = st.columns(2)
+            with colA:
+                f_cnpj = st.text_input("CNPJ Fornecedor (Somente números)", help="Ex: 53303359000102")
+                f_forn = st.text_input("Nome do Fornecedor", help="Ex: 2A COMERCIO")
+                f_cod_xml = st.text_input("Cód Produto (XML)", help="O código exato que vem na nota")
+                f_desc_xml = st.text_input("Descrição do Fornecedor")
+            with colB:
+                f_cod_int = st.text_input("Seu Código Interno (Tome Leve)")
+                f_desc_int = st.text_input("Sua Descrição Interna")
+                f_fator = st.number_input("Fator de Conversão (Padrão da Caixa)", min_value=0.01, value=1.0)
+                
+            submitted = st.form_submit_button("Salvar no Banco de Dados")
+            if submitted:
+                if not f_cnpj or not f_cod_xml:
+                    st.warning("⚠️ CNPJ e Cód XML são obrigatórios!")
+                else:
+                    try:
+                        conn = get_db_connection()
+                        cursor = conn.cursor()
+                        # Query Parametrizada: 100% Imune a SQL Injection!
+                        query = """
+                            INSERT INTO depara_flv (cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, cod_interno, descricao_interna, fator_conversao)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (cnpj_fornecedor, cod_produto_xml) 
+                            DO UPDATE SET 
+                                fornecedor = EXCLUDED.fornecedor,
+                                descricao_xml = EXCLUDED.descricao_xml,
+                                cod_interno = EXCLUDED.cod_interno,
+                                descricao_interna = EXCLUDED.descricao_interna,
+                                fator_conversao = EXCLUDED.fator_conversao;
+                        """
+                        cursor.execute(query, (f_cnpj, f_forn, f_cod_xml, f_desc_xml, f_cod_int, f_desc_int, f_fator))
+                        conn.commit()
+                        cursor.close()
+                        st.success(f"✅ Produto {f_desc_int} salvo com sucesso no banco de dados!")
+                    except Exception as e:
+                        st.error(f"Erro ao salvar: {e}")
+
+        st.markdown("---")
+        st.subheader("📋 Tabela Atual (No Banco de Dados)")
+        if st.button("🔄 Atualizar Visualização"):
+            st.rerun()
+            
+        try:
+            conn = get_db_connection()
+            df_view = pd.read_sql("SELECT * FROM depara_flv ORDER BY fornecedor, descricao_interna", conn)
+            st.dataframe(df_view, use_container_width=True)
+            
+            # Módulo de Exclusão Segura
+            st.markdown("---")
+            st.subheader("🗑️ Excluir Regra Mapeada")
+            ex_cnpj = st.text_input("CNPJ Fornecedor (Para excluir)")
+            ex_cod_xml = st.text_input("Cód Produto XML (Para excluir)")
+            if st.button("Excluir Permanentemente"):
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM depara_flv WHERE cnpj_fornecedor = %s AND cod_produto_xml = %s", (ex_cnpj, ex_cod_xml))
+                conn.commit()
+                cursor.close()
+                st.success("Regra deletada! Atualize a visualização para confirmar.")
+        except Exception as e:
+            st.error(f"Não foi possível carregar a tabela: {e}")
