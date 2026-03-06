@@ -2,3 +2,6 @@ streamlit==1.31.0
 pandas==2.2.0
 openpyxl==3.1.2
 rapidfuzz==3.6.1
+psycopg2-binary
+google-generativeai
+toml
