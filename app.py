@@ -170,7 +170,7 @@ def gerar_excel_auditoria(df_final):
 aba_preparador, aba_auditoria, aba_gestao = st.tabs(["🧹 1. Preparador", "🍎 2. Auditoria DB", "⚙️ 3. Gestão de Produtos"])
 
 # ----------------------------------------------------------
-# TELA 1: PREPARADOR (Mantida intacta)
+# TELA 1: PREPARADOR
 # ----------------------------------------------------------
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador")
@@ -178,7 +178,7 @@ with aba_preparador:
     if st.button("Limpar e Preparar Planilha"):
         if not arquivo_bruto: st.warning("Envie a planilha bruta.")
         else:
-            with st.spinner("Blindando..."):
+            with st.spinner("Blindando e formatando visualmente..."):
                 try:
                     df_bruto = pd.read_excel(arquivo_bruto, header=None) if arquivo_bruto.name.endswith('.xlsx') else pd.read_csv(arquivo_bruto, header=None)
                     lojas_alvo, coluna_padrao, coluna_custo = {}, -1, -1
@@ -218,32 +218,69 @@ with aba_preparador:
                     df_dados = df_bruto.dropna(subset=[0]).copy()
                     df_dados[0] = df_dados[0].astype(int)
 
+                    # --- INÍCIO DA ESTÉTICA OPENPYXL ---
                     wb = Workbook()
                     wb.remove(wb.active)
+                    
+                    fill_loja = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+                    font_loja = Font(color="FFFFFF", bold=True, size=14)
+                    fill_fornecedor = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+                    font_fornecedor = Font(color="002060", bold=True, size=11)
+                    data_geracao = datetime.now().strftime('%d/%m/%Y')
+
                     for nome_loja, indice_coluna in lojas_alvo.items():
                         if indice_coluna >= max_col: continue
                         df_loja = df_dados[[0, 1, 'Cod_Fornecedor', 'Fornecedor', indice_coluna, coluna_padrao, coluna_custo]].copy()
                         df_loja.columns = ['Código', 'Descrição', 'Cod_Fornecedor', 'Fornecedor', 'Qtd_Pedida', 'Padrão_Cx', 'Custo']
                         df_loja['Qtd_Pedida'] = pd.to_numeric(df_loja['Qtd_Pedida'], errors='coerce')
+                        df_loja['Custo'] = pd.to_numeric(df_loja['Custo'], errors='coerce').fillna(0)
                         df_loja = df_loja[df_loja['Qtd_Pedida'] > 0]
                         if df_loja.empty: continue
                         
                         ws = wb.create_sheet(title=nome_loja)
-                        ws.append([f"CONFERÊNCIA - {nome_loja.upper()}"])
+                        
+                        # Linha 1: Título da Loja e Data
+                        ws.append([f"CONFERÊNCIA - {nome_loja.upper().replace('_', ' ')}", "", "", "", f"Data: {data_geracao}"])
+                        ws.merge_cells('A1:D1')
+                        ws['A1'].fill = fill_loja
+                        ws['A1'].font = font_loja
+                        ws['E1'].fill = fill_loja
+                        ws['E1'].font = Font(color="FFFFFF", bold=True)
+                        ws['E1'].alignment = Alignment(horizontal="right")
+                        
+                        # Linha 2: Cabeçalhos
                         ws.append(['Código', 'Descrição', 'Qtd_Pedida', 'Padrão_Cx', 'Custo'])
+                        for cell in ws[2]: cell.font = Font(bold=True)
                         
                         current_forn = None
                         for _, row in df_loja.sort_values(by=['Fornecedor', 'Descrição']).iterrows():
                             if row['Fornecedor'] != current_forn:
+                                if current_forn is not None: ws.append([]) # Linha em branco para separar
                                 current_forn = row['Fornecedor']
                                 ws.append([f"Fornecedor: {row['Cod_Fornecedor']} - {current_forn}", "", "", "", ""])
+                                row_idx = ws.max_row
+                                ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=5)
+                                for cell in ws[row_idx]:
+                                    cell.fill = fill_fornecedor
+                                    cell.font = font_fornecedor
+                                    
+                            # Inserindo os produtos
                             ws.append([row['Código'], row['Descrição'], row['Qtd_Pedida'], row['Padrão_Cx'], row['Custo']])
+                            # Formatando a coluna de Custo (Coluna 5) como Moeda
+                            ws.cell(row=ws.max_row, column=5).number_format = '"R$" #,##0.00'
+
+                        # Ajustando o tamanho das colunas automaticamente
+                        ws.column_dimensions['A'].width = 15
+                        ws.column_dimensions['B'].width = 45
+                        ws.column_dimensions['C'].width = 15
+                        ws.column_dimensions['D'].width = 15
+                        ws.column_dimensions['E'].width = 15
 
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
-                    st.success("✨ Planilha preparada!")
-                    st.download_button("📥 Baixar Planilha", data=out_excel.getvalue(), file_name="Pedidos_Blindados.xlsx")
-                except Exception as e: st.error(f"Erro: {e}")
+                    st.success("✨ Planilha preparada com estética nível Enterprise!")
+                    st.download_button("📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx")
+                except Exception as e: st.error(f"Erro no Preparador: {e}")
 
 # ----------------------------------------------------------
 # TELA 2: AUDITORIA DB
@@ -473,8 +510,28 @@ with aba_gestao:
             
         try:
             conn = get_db_connection()
-            df_view = pd.read_sql("SELECT * FROM depara_flv ORDER BY fornecedor, descricao_interna", conn)
+            
+            # --- NOVO BLOCO DE LEITURA BLINDADO ---
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, 
+                       cod_interno, descricao_interna, fator_conversao 
+                FROM depara_flv 
+                ORDER BY fornecedor, descricao_interna
+            """)
+            dados_tabela = cursor.fetchall()
+            
+            # Criando nomes bonitos para as colunas na tela
+            colunas_tabela = [
+                "CNPJ Fornecedor", "Fornecedor", "Cód XML", "Descrição XML", 
+                "Cód Interno", "Descrição Interna", "Fator Conversão"
+            ]
+            
+            df_view = pd.DataFrame(dados_tabela, columns=colunas_tabela)
+            cursor.close()
+            
             st.dataframe(df_view, use_container_width=True)
+            # --------------------------------------
             
             # Módulo de Exclusão Segura
             st.markdown("---")
@@ -482,10 +539,11 @@ with aba_gestao:
             ex_cnpj = st.text_input("CNPJ Fornecedor (Para excluir)")
             ex_cod_xml = st.text_input("Cód Produto XML (Para excluir)")
             if st.button("Excluir Permanentemente"):
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM depara_flv WHERE cnpj_fornecedor = %s AND cod_produto_xml = %s", (ex_cnpj, ex_cod_xml))
+                cursor_ex = conn.cursor()
+                cursor_ex.execute("DELETE FROM depara_flv WHERE cnpj_fornecedor = %s AND cod_produto_xml = %s", (ex_cnpj, ex_cod_xml))
                 conn.commit()
-                cursor.close()
+                cursor_ex.close()
                 st.success("Regra deletada! Atualize a visualização para confirmar.")
         except Exception as e:
             st.error(f"Não foi possível carregar a tabela: {e}")
+
