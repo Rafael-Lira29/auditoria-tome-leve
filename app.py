@@ -5,7 +5,7 @@ import unicodedata
 from rapidfuzz import process, fuzz
 import xml.etree.ElementTree as ET
 import io
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 import psycopg2
@@ -226,7 +226,8 @@ with aba_preparador:
                     font_loja = Font(color="FFFFFF", bold=True, size=14)
                     fill_fornecedor = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
                     font_fornecedor = Font(color="002060", bold=True, size=11)
-                    data_geracao = datetime.now().strftime('%d/%m/%Y')
+                    fuso_br = timezone(timedelta(hours=-3))
+                    data_geracao = datetime.now(fuso_br).strftime('%d/%m/%Y')
 
                     for nome_loja, indice_coluna in lojas_alvo.items():
                         if indice_coluna >= max_col: continue
@@ -279,7 +280,7 @@ with aba_preparador:
                     out_excel = io.BytesIO()
                     wb.save(out_excel)
                     st.success("✨ Planilha preparada com estética nível Enterprise!")
-                    st.download_button("📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now().strftime('%Y%m%d')}.xlsx")
+                    st.download_button("📥 Baixar Planilha Blindada", data=out_excel.getvalue(), file_name=f"Pedidos_Blindados_{datetime.now(fuso_br).strftime('%Y%m%d')}.xlsx")
                 except Exception as e: st.error(f"Erro no Preparador: {e}")
 
 # ----------------------------------------------------------
@@ -546,4 +547,5 @@ with aba_gestao:
                 st.success("Regra deletada! Atualize a visualização para confirmar.")
         except Exception as e:
             st.error(f"Não foi possível carregar a tabela: {e}")
+
 
