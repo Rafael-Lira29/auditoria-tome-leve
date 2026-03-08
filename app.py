@@ -35,12 +35,13 @@ st.title("🍎 Sistema Integrado FLV Enterprise")
 NAMESPACE_NFE = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
 TOLERANCIA_DIF = 0.001
 
-@st.cache_resource
+# Conexão livre de cache para evitar "connection already closed"
 def get_db_connection():
     return psycopg2.connect(st.secrets["DATABASE_URL"])
 
 def carregar_dicionario_banco():
     dict_depara = {}
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -50,9 +51,11 @@ def carregar_dicionario_banco():
             cnpj, cod_xml, desc_int, fator, cod_int = row
             if cod_int and cod_int != 'nan':
                 dict_depara[(str(cnpj).strip(), str(cod_xml).strip())] = (str(desc_int).strip(), float(fator))
-        cursor.close()
     except Exception as e:
-        st.error(f"Erro ao conectar com o banco de dados: {e}")
+        st.error(f"Erro ao ligar à base de dados: {e}")
+    finally:
+        if conn is not None:
+            conn.close() # A porta é fechada em segurança
     return dict_depara
 
 def normalizar(texto):
@@ -482,9 +485,10 @@ with aba_gestao:
                 if not f_cnpj or not f_cod_xml:
                     st.warning("⚠️ CNPJ e Cód XML são obrigatórios!")
                 else:
+                    conn_insert = None
                     try:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
+                        conn_insert = get_db_connection()
+                        cursor = conn_insert.cursor()
                         # Query Parametrizada: 100% Imune a SQL Injection!
                         query = """
                             INSERT INTO depara_flv (cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, cod_interno, descricao_interna, fator_conversao)
@@ -498,22 +502,25 @@ with aba_gestao:
                                 fator_conversao = EXCLUDED.fator_conversao;
                         """
                         cursor.execute(query, (f_cnpj, f_forn, f_cod_xml, f_desc_xml, f_cod_int, f_desc_int, f_fator))
-                        conn.commit()
+                        conn_insert.commit()
                         cursor.close()
                         st.success(f"✅ Produto {f_desc_int} salvo com sucesso no banco de dados!")
                     except Exception as e:
                         st.error(f"Erro ao salvar: {e}")
+                    finally:
+                        if conn_insert is not None:
+                            conn_insert.close()
 
         st.markdown("---")
         st.subheader("📋 Tabela Atual (No Banco de Dados)")
         if st.button("🔄 Atualizar Visualização"):
             st.rerun()
             
+        conn_view = None
         try:
-            conn = get_db_connection()
-            
+            conn_view = get_db_connection()
             # --- NOVO BLOCO DE LEITURA BLINDADO ---
-            cursor = conn.cursor()
+            cursor = conn_view.cursor()
             cursor.execute("""
                 SELECT cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, 
                        cod_interno, descricao_interna, fator_conversao 
@@ -530,22 +537,30 @@ with aba_gestao:
             
             df_view = pd.DataFrame(dados_tabela, columns=colunas_tabela)
             cursor.close()
-            
             st.dataframe(df_view, use_container_width=True)
             # --------------------------------------
-            
-            # Módulo de Exclusão Segura
-            st.markdown("---")
-            st.subheader("🗑️ Excluir Regra Mapeada")
-            ex_cnpj = st.text_input("CNPJ Fornecedor (Para excluir)")
-            ex_cod_xml = st.text_input("Cód Produto XML (Para excluir)")
-            if st.button("Excluir Permanentemente"):
-                cursor_ex = conn.cursor()
-                cursor_ex.execute("DELETE FROM depara_flv WHERE cnpj_fornecedor = %s AND cod_produto_xml = %s", (ex_cnpj, ex_cod_xml))
-                conn.commit()
-                cursor_ex.close()
-                st.success("Regra deletada! Atualize a visualização para confirmar.")
         except Exception as e:
             st.error(f"Não foi possível carregar a tabela: {e}")
-
-
+        finally:
+            if conn_view is not None:
+                conn_view.close()
+                
+        # Módulo de Exclusão Segura
+        st.markdown("---")
+        st.subheader("🗑️ Excluir Regra Mapeada")
+        ex_cnpj = st.text_input("CNPJ Fornecedor (Para excluir)")
+        ex_cod_xml = st.text_input("Cód Produto XML (Para excluir)")
+        if st.button("Excluir Permanentemente"):
+            conn_ex = None
+            try:
+                conn_ex = get_db_connection()
+                cursor_ex = conn_ex.cursor()
+                cursor_ex.execute("DELETE FROM depara_flv WHERE cnpj_fornecedor = %s AND cod_produto_xml = %s", (ex_cnpj, ex_cod_xml))
+                conn_ex.commit()
+                cursor_ex.close()
+                st.success("Regra deletada! Atualize a visualização para confirmar.")
+            except Exception as e:
+                st.error(f"Erro ao excluir regra: {e}")
+            finally:
+                if conn_ex is not None:
+                    conn_ex.close()
