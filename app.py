@@ -134,6 +134,24 @@ class NFeRepository:
                     cnpj_forn_limpo = ''.join(filter(str.isdigit, cnpj_forn))
                     cod_xml_limpo = cod_xml.lstrip('0')
 
+                    # ==========================================
+                    # 🕵️‍♂️ INÍCIO DO CÓDIGO ESPIÃO
+                    # ==========================================
+                    if prod_node.text and "UVA" in prod_node.text.upper():
+                        print(f"\n🕵️ ACHOU UVA NO XML!")
+                        print(f"   -> Produto: {prod_node.text}")
+                        print(f"   -> CNPJ Limpo: '{cnpj_forn_limpo}'")
+                        print(f"   -> Cód XML Limpo: '{cod_xml_limpo}'")
+                        print(f"   -> Loja Destino: {loja_xml}\n")
+                    
+                    if loja_xml == "Loja_Desconhecida":
+                        print(f"\n⚠️ XML SEM DONO (LOJA NÃO MAPEADA)!")
+                        print(f"   -> CNPJ Destino no XML: '{dest_node.text}'")
+                        print(f"   -> Nome Destino no XML: '{dest_nome_node.text}'\n")
+                    # ==========================================
+                    # FIM DO CÓDIGO ESPIÃO
+                    # ==========================================
+
                     origem_match = "XML (Fuzzy)"
                     nome_final = normalizar(prod_node.text)
                     qtd_final = qtd_xml
@@ -145,9 +163,11 @@ class NFeRepository:
                         origem_match = "De-Para ⚡"
 
                     notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": nome_final, "Qtd": qtd_final, "Origem": origem_match})
-            except Exception: pass
+            except Exception as e: 
+                # Adicionei este print também para garantir que nenhum erro silencioso passe despercebido
+                print(f"Erro ao ler um XML: {e}")
+                pass
         return pd.DataFrame(notas), textos_infcpl
-
 class PedidoRepository:
     def extrair_pedidos_excel(self, arquivo_excel, mapping_forn):
         df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
@@ -368,3 +388,4 @@ with aba_auditoria:
 with aba_gestao:
     st.header("⚙️ Painel de Gestão (De-Para)")
     st.info("A gestão do dicionário De-Para continua a operar no banco de forma segura. O código desta aba permanece igual ao original.")
+
