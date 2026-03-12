@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import unicodedata
-from rapidfuzz import process, fuzz
+from rapidfuzz import fuzz
 import xml.etree.ElementTree as ET
 import io
 from datetime import datetime, timedelta, timezone
@@ -30,33 +30,12 @@ st.markdown("""
 st.title("🍎 Sistema Integrado FLV Enterprise")
 
 # ==========================================================
-# CÉREBRO LÓGICO E CONEXÃO DB
+# CONSTANTES E FUNÇÕES AUXILIARES GLOBAIS
 # ==========================================================
 NAMESPACE_NFE = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
-TOLERANCIA_DIF = 0.001
 
-# Conexão livre de cache para evitar "connection already closed"
 def get_db_connection():
     return psycopg2.connect(st.secrets["DATABASE_URL"])
-
-def carregar_dicionario_banco():
-    dict_depara = {}
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT cnpj_fornecedor, cod_produto_xml, descricao_interna, fator_conversao, cod_interno FROM depara_flv")
-        rows = cursor.fetchall()
-        for row in rows:
-            cnpj, cod_xml, desc_int, fator, cod_int = row
-            if cod_int and cod_int != 'nan':
-                dict_depara[(str(cnpj).strip(), str(cod_xml).strip())] = (str(desc_int).strip(), float(fator))
-    except Exception as e:
-        st.error(f"Erro ao ligar à base de dados: {e}")
-    finally:
-        if conn is not None:
-            conn.close() # A porta é fechada em segurança
-    return dict_depara
 
 def normalizar(texto):
     if pd.isna(texto) or texto is None: return ""
@@ -94,28 +73,210 @@ def traduzir_fornecedor(nome_bruto):
     if 'LUCIO' in nome: return 'LUCIO ORLANDO'
     return nome.replace("FORNECEDOR", "").strip()
 
-def classificar(qtd_ped, qtd_fat, tipo):
-    if tipo == "SEM_FORNECEDOR": return ("⚪ SEM NFe P/ FORN", 98, -qtd_ped)
-    if tipo == "SEM_PRODUTO": return ("⚪ PRODUTO NÃO FATURADO", 99, -qtd_ped)
-    diferenca = qtd_fat - qtd_ped
-    if abs(diferenca) < TOLERANCIA_DIF: return ("🟢 OK", 0, 0.0)
-    if diferenca < 0: return (f"🔴 NFe FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
-    return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
+# ==========================================================
+# 1. REPOSITORY LAYER (Acesso a Dados Cru e Arquivos)
+# ==========================================================
+class DatabaseRepository:
+    def carregar_dicionario_depara(self):
+        dict_depara = {}
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT cnpj_fornecedor, cod_produto_xml, descricao_interna, fator_conversao FROM depara_flv")
+            for row in cursor.fetchall():
+                cnpj, cod_xml, desc_int, fator = row
+                dict_depara[(str(cnpj).strip(), str(cod_xml).strip())] = (str(desc_int).strip(), float(fator))
+        finally:
+            if conn: conn.close()
+        return dict_depara
 
-def analisar_com_ia(produto, diferenca_negativa, texto_infcpl):
-    if not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, "IA Desligada"
-    if not texto_infcpl or len(texto_infcpl.strip()) < 5: return False, ""
-    try:
-        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = f"Houve FALTA de {abs(diferenca_negativa)} de '{produto}'. O fornecedor escreveu na nota: '{texto_infcpl}'. Isso justifica a falta? Responda ESTRITAMENTE: [SIM] ou [NAO] - Justificativa em 10 palavras."
-        resposta = model.generate_content(prompt).text.strip()
-        if resposta.startswith("[SIM]"): return True, resposta
-        return False, resposta
-    except Exception: return False, "Erro IA"
+class NFeRepository:
+    def extrair_dados_xml(self, arquivos_xml, dict_depara):
+        notas = []
+        textos_infcpl = {} 
+        for xml_file in arquivos_xml:
+            try:
+                tree = ET.parse(io.BytesIO(xml_file.read()))
+                root = tree.getroot()
+                inf = root.find('.//nfe:infNFe', NAMESPACE_NFE)
+                if inf is None: continue
+                
+                emit_node = inf.find('nfe:emit/nfe:xNome', NAMESPACE_NFE)
+                cnpj_node = inf.find('nfe:emit/nfe:CNPJ', NAMESPACE_NFE)
+                dest_node = inf.find('nfe:dest/nfe:CNPJ', NAMESPACE_NFE)
+                dest_nome_node = inf.find('nfe:dest/nfe:xNome', NAMESPACE_NFE)
+                
+                forn_macro = traduzir_fornecedor(emit_node.text) if emit_node is not None else "DESCONHECIDO"
+                cnpj_forn = cnpj_node.text.strip() if cnpj_node is not None else ""
+                loja_xml = descobrir_loja(dest_node.text if dest_node is not None else "0", dest_nome_node.text if dest_nome_node is not None else "")
+                
+                infAdic = inf.find('nfe:infAdic/nfe:infCpl', NAMESPACE_NFE)
+                if infAdic is not None and infAdic.text:
+                    textos_infcpl[(loja_xml, forn_macro)] = infAdic.text
+
+                for det in inf.findall('nfe:det', NAMESPACE_NFE):
+                    prod_node = det.find('nfe:prod/nfe:xProd', NAMESPACE_NFE)
+                    cod_node = det.find('nfe:prod/nfe:cProd', NAMESPACE_NFE)
+                    qtd_node = det.find('nfe:prod/nfe:qCom', NAMESPACE_NFE)
+                    
+                    if prod_node is None or qtd_node is None: continue
+                    
+                    cod_xml = cod_node.text.strip() if cod_node is not None else ""
+                    qtd_xml = float(qtd_node.text)
+
+                    origem_match = "XML (Fuzzy)"
+                    nome_final = normalizar(prod_node.text)
+                    qtd_final = qtd_xml
+                    
+                    # Aplicação do De-Para direto na extração
+                    if (cnpj_forn, cod_xml) in dict_depara:
+                        desc_interna, fator = dict_depara[(cnpj_forn, cod_xml)]
+                        nome_final = normalizar(desc_interna)
+                        qtd_final = qtd_xml * fator
+                        origem_match = "De-Para ⚡"
+
+                    notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": nome_final, "Qtd": qtd_final, "Origem": origem_match})
+            except Exception: pass
+            
+        return pd.DataFrame(notas), textos_infcpl
+
+class PedidoRepository:
+    def extrair_pedidos_excel(self, arquivo_excel):
+        df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
+        pedidos_lista = []
+        for aba, df in df_pedidos_raw.items():
+            forn_orig, forn_macro = "DESCONHECIDO", "DESCONHECIDO"
+            for _, row in df.iterrows():
+                col0 = str(row[0]).strip()
+                if col0.startswith("Fornecedor:"):
+                    forn_orig = col0.replace("Fornecedor:", "").strip()
+                    forn_macro = traduzir_fornecedor(forn_orig)
+                else:
+                    val = pd.to_numeric(col0, errors='coerce')
+                    if pd.notna(val) and val > 0:
+                        try:
+                            qtd_bruta = float(row[2]) if pd.notna(row[2]) else 0.0
+                            padrao_cx = float(row[3]) if pd.notna(row[3]) else 1.0
+                            qtd_convertida_kg = qtd_bruta * padrao_cx
+                        except: qtd_convertida_kg = 0.0
+                        
+                        pedidos_lista.append({
+                            'Loja': aba, 'Fornecedor_Original': forn_orig, 'Fornecedor_Macro': forn_macro,
+                            'Produto': normalizar(row[1]), 'Qtd': qtd_convertida_kg
+                        })
+        return pd.DataFrame(pedidos_lista)
 
 # ==========================================================
-# GERADOR DE EXCEL
+# 2. SERVICE LAYER (Regras de Negócio e Lógica Implacável)
+# ==========================================================
+class AuditoriaService:
+    def __init__(self, usar_ia):
+        self.usar_ia = usar_ia
+        self.TOLERANCIA_DIF = 0.001
+        self.FUZZY_THRESHOLD = 85 # O CÃO DE GUARDA DA AUDITORIA
+
+    def _classificar(self, qtd_ped, qtd_fat, tipo):
+        if tipo == "SEM_FORNECEDOR": return ("⚪ SEM NFe P/ FORN", 98, -qtd_ped)
+        if tipo == "SEM_PRODUTO": return ("⚪ PRODUTO NÃO FATURADO", 99, -qtd_ped)
+        diferenca = qtd_fat - qtd_ped
+        if abs(diferenca) < self.TOLERANCIA_DIF: return ("🟢 OK", 0, 0.0)
+        if diferenca < 0: return (f"🔴 NFe FALTA {abs(diferenca):.2f}".replace('.00',''), -1, diferenca)
+        return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
+
+    def _analisar_com_ia(self, produto, diferenca_negativa, texto_infcpl):
+        if not self.usar_ia or not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, ""
+        if not texto_infcpl or len(texto_infcpl.strip()) < 5: return False, ""
+        try:
+            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            prompt = f"Houve FALTA de {abs(diferenca_negativa)} de '{produto}'. O fornecedor escreveu na nota: '{texto_infcpl}'. Isso justifica a falta? Responda ESTRITAMENTE: [SIM] ou [NAO] - Justificativa em 10 palavras."
+            resposta = model.generate_content(prompt).text.strip()
+            if resposta.startswith("[SIM]"): return True, resposta
+            return False, resposta
+        except Exception: return False, "Erro IA"
+
+    def processar_cruzamento(self, df_pedidos, df_notas, textos_infcpl):
+        if df_pedidos.empty: return pd.DataFrame()
+        
+        # Agrupa pedidos e notas
+        df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
+        df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto', 'Origem'], as_index=False)['Qtd'].sum() if not df_notas.empty else pd.DataFrame()
+
+        registros = []
+        for (loja, forn_macro), df_ped_group in df_pedidos.groupby(['Loja', 'Fornecedor_Macro']):
+            notas_forn = df_notas_agg[(df_notas_agg['Loja'] == loja) & (df_notas_agg['Fornecedor_Macro'] == forn_macro)] if not df_notas_agg.empty else pd.DataFrame()
+            infcpl_nota = textos_infcpl.get((loja, forn_macro), "")
+
+            if notas_forn.empty:
+                for _, ped in df_ped_group.iterrows():
+                    stat_v, stat_c, dif = self._classificar(ped['Qtd'], 0, "SEM_FORNECEDOR")
+                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NÃO ENCONTRADA", ped['Qtd'], 0, "-", dif, stat_v, stat_c, "", "-", "-", "⚪ SEM CONTAGEM", 0.0))
+                continue
+
+            matched_ped_idx, matched_xml_idx, pairs = set(), set(), []
+            
+            # Cálculo de Score Rigoroso
+            for idx_ped, ped in df_ped_group.iterrows():
+                for idx_xml, nota in notas_forn.iterrows():
+                    score = fuzz.token_sort_ratio(ped['Produto'], nota['Produto'])
+                    pairs.append((score, idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd'], nota['Origem']))
+            
+            pairs.sort(key=lambda x: x[0], reverse=True) 
+            
+            # Associação Controlada
+            for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat, origem_m in pairs:
+                # O Cão de Guarda atua aqui: Ignora matches com similaridade abaixo do Threshold (se não for De-Para exato)
+                if score < self.FUZZY_THRESHOLD and origem_m != "De-Para ⚡":
+                    continue 
+
+                if idx_ped not in matched_ped_idx and idx_xml not in matched_xml_idx:
+                    matched_ped_idx.add(idx_ped); matched_xml_idx.add(idx_xml)
+                    stat_v, stat_c, dif = self._classificar(qtd_ped, qtd_fat, "OK")
+                    
+                    just_ia = ""
+                    if "🔴 NFe FALTA" in stat_v:
+                        justificado, just_texto = self._analisar_com_ia(df_ped_group.loc[idx_ped, 'Produto'], dif, infcpl_nota)
+                        if justificado: stat_v = f"🤖 JUSTIFICADO (Faltou {abs(dif):.0f})"
+                        just_ia = just_texto
+                    
+                    registros.append((loja, df_ped_group.loc[idx_ped, 'Fornecedor_Original'], df_ped_group.loc[idx_ped, 'Produto'], prod_xml, qtd_ped, qtd_fat, origem_m, dif, stat_v, stat_c, just_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
+
+            # Registra as faltas absolutas (itens do pedido que não acharam par válido no XML)
+            for idx_ped, ped in df_ped_group.iterrows():
+                if idx_ped not in matched_ped_idx:
+                    stat_v, stat_c, dif = self._classificar(ped['Qtd'], 0, "SEM_PRODUTO")
+                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NÃO ENCONTRADA", ped['Qtd'], 0, "-", dif, stat_v, stat_c, "", "-", "-", "⚪ SEM CONTAGEM", 0.0))
+
+        if not registros: return pd.DataFrame()
+        return pd.DataFrame(registros, columns=[
+            'loja','fornecedor','produto_pedido','produto_xml',
+            'qtd_pedido','qtd_nota', 'origem_match', 'diferenca','status_visual','status_codigo',
+            'justificativa_ia', 'qtd_fisico', 'padrao_fisico', 'status_doca', 'diferenca_doca'
+        ])
+
+# ==========================================================
+# 3. CONTROLLER LAYER (Orquestração das Requisições)
+# ==========================================================
+class AuditoriaController:
+    def executar_auditoria(self, arquivo_excel, arquivos_xml, usar_ia):
+        # 1. Instancia os Repositórios e Serviços
+        db_repo = DatabaseRepository()
+        pedido_repo = PedidoRepository()
+        nfe_repo = NFeRepository()
+        service = AuditoriaService(usar_ia)
+
+        # 2. Extrai os Dados Brutos
+        dict_depara = db_repo.carregar_dicionario_depara()
+        df_pedidos = pedido_repo.extrair_pedidos_excel(arquivo_excel)
+        df_notas, textos_infcpl = nfe_repo.extrair_dados_xml(arquivos_xml, dict_depara)
+
+        # 3. Aplica a Regra de Negócio
+        df_resultado = service.processar_cruzamento(df_pedidos, df_notas, textos_infcpl)
+        return df_resultado
+
+# ==========================================================
+# GERADOR DE EXCEL E VIEW
 # ==========================================================
 def gerar_excel_auditoria(df_final):
     df_final = df_final.fillna("")
@@ -173,7 +334,7 @@ def gerar_excel_auditoria(df_final):
 aba_preparador, aba_auditoria, aba_gestao = st.tabs(["🧹 1. Preparador", "🍎 2. Auditoria DB", "⚙️ 3. Gestão de Produtos"])
 
 # ----------------------------------------------------------
-# TELA 1: PREPARADOR
+# TELA 1: PREPARADOR (Mantida Fiel ao Original)
 # ----------------------------------------------------------
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador")
@@ -221,7 +382,6 @@ with aba_preparador:
                     df_dados = df_bruto.dropna(subset=[0]).copy()
                     df_dados[0] = df_dados[0].astype(int)
 
-                    # --- INÍCIO DA ESTÉTICA OPENPYXL ---
                     wb = Workbook()
                     wb.remove(wb.active)
                     
@@ -243,7 +403,6 @@ with aba_preparador:
                         
                         ws = wb.create_sheet(title=nome_loja)
                         
-                        # Linha 1: Título da Loja e Data
                         ws.append([f"CONFERÊNCIA - {nome_loja.upper().replace('_', ' ')}", "", "", "", f"Data: {data_geracao}"])
                         ws.merge_cells('A1:D1')
                         ws['A1'].fill = fill_loja
@@ -252,14 +411,13 @@ with aba_preparador:
                         ws['E1'].font = Font(color="FFFFFF", bold=True)
                         ws['E1'].alignment = Alignment(horizontal="right")
                         
-                        # Linha 2: Cabeçalhos
                         ws.append(['Código', 'Descrição', 'Qtd_Pedida', 'Padrão_Cx', 'Custo'])
                         for cell in ws[2]: cell.font = Font(bold=True)
                         
                         current_forn = None
                         for _, row in df_loja.sort_values(by=['Fornecedor', 'Descrição']).iterrows():
                             if row['Fornecedor'] != current_forn:
-                                if current_forn is not None: ws.append([]) # Linha em branco para separar
+                                if current_forn is not None: ws.append([])
                                 current_forn = row['Fornecedor']
                                 ws.append([f"Fornecedor: {row['Cod_Fornecedor']} - {current_forn}", "", "", "", ""])
                                 row_idx = ws.max_row
@@ -268,12 +426,9 @@ with aba_preparador:
                                     cell.fill = fill_fornecedor
                                     cell.font = font_fornecedor
                                     
-                            # Inserindo os produtos
                             ws.append([row['Código'], row['Descrição'], row['Qtd_Pedida'], row['Padrão_Cx'], row['Custo']])
-                            # Formatando a coluna de Custo (Coluna 5) como Moeda
                             ws.cell(row=ws.max_row, column=5).number_format = '"R$" #,##0.00'
 
-                        # Ajustando o tamanho das colunas automaticamente
                         ws.column_dimensions['A'].width = 15
                         ws.column_dimensions['B'].width = 45
                         ws.column_dimensions['C'].width = 15
@@ -287,7 +442,7 @@ with aba_preparador:
                 except Exception as e: st.error(f"Erro no Preparador: {e}")
 
 # ----------------------------------------------------------
-# TELA 2: AUDITORIA DB
+# TELA 2: AUDITORIA DB (TOTALMENTE REFATORADA PARA MVC)
 # ----------------------------------------------------------
 with aba_auditoria:
     st.header("🍎 Cruzamento Triplo via Neon DB")
@@ -306,158 +461,40 @@ with aba_auditoria:
         if not arquivo_excel or not arquivos_xml:
             st.warning("⚠️ Precisa de Pedido e XMLs.")
         else:
-            with st.spinner("Puxando cérebro do PostgreSQL e processando..."):
+            with st.spinner("Puxando dados e orquestrando pelo Controller MVC..."):
                 try:
-                    # 1. PUXA DO BANCO DE DADOS
-                    dict_depara = carregar_dicionario_banco()
-
-                    # 2. LÊ PEDIDOS (COM CONVERSÃO CX -> KG)
-                    df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
-                    pedidos_lista = []
-                    for aba, df in df_pedidos_raw.items():
-                        forn_orig, forn_macro = "DESCONHECIDO", "DESCONHECIDO"
-                        for _, row in df.iterrows():
-                            col0 = str(row[0]).strip()
-                            if col0.startswith("Fornecedor:"):
-                                forn_orig = col0.replace("Fornecedor:", "").strip()
-                                forn_macro = traduzir_fornecedor(forn_orig)
-                            else:
-                                val = pd.to_numeric(col0, errors='coerce')
-                                if pd.notna(val) and val > 0:
-                                    try:
-                                        qtd_bruta = float(row[2]) if pd.notna(row[2]) else 0.0
-                                        padrao_cx = float(row[3]) if pd.notna(row[3]) else 1.0
-                                        qtd_convertida_kg = qtd_bruta * padrao_cx
-                                    except: qtd_convertida_kg = 0.0
-                                        
-                                    pedidos_lista.append({
-                                        'Loja': aba, 'Fornecedor_Original': forn_orig, 'Fornecedor_Macro': forn_macro,
-                                        'Produto': normalizar(row[1]), 'Qtd': qtd_convertida_kg
-                                    })
-                    df_pedidos = pd.DataFrame(pedidos_lista)
-                    if not df_pedidos.empty:
-                        df_pedidos = df_pedidos.groupby(['Loja', 'Fornecedor_Original', 'Fornecedor_Macro', 'Produto'], as_index=False)['Qtd'].sum()
-
-                    # 3. LÊ XMLs
-                    notas = []
-                    textos_infcpl = {} 
-                    for xml_file in arquivos_xml:
-                        try:
-                            tree = ET.parse(io.BytesIO(xml_file.read()))
-                            root = tree.getroot()
-                            inf = root.find('.//nfe:infNFe', NAMESPACE_NFE)
-                            if inf is None: continue
-                            
-                            emit_node = inf.find('nfe:emit/nfe:xNome', NAMESPACE_NFE)
-                            cnpj_node = inf.find('nfe:emit/nfe:CNPJ', NAMESPACE_NFE)
-                            dest_node = inf.find('nfe:dest/nfe:CNPJ', NAMESPACE_NFE)
-                            dest_nome_node = inf.find('nfe:dest/nfe:xNome', NAMESPACE_NFE)
-                            
-                            forn_macro = traduzir_fornecedor(emit_node.text) if emit_node is not None else "DESCONHECIDO"
-                            cnpj_forn = cnpj_node.text.strip() if cnpj_node is not None else ""
-                            loja_xml = descobrir_loja(dest_node.text if dest_node is not None else "0", dest_nome_node.text if dest_nome_node is not None else "")
-                            
-                            infAdic = inf.find('nfe:infAdic/nfe:infCpl', NAMESPACE_NFE)
-                            if infAdic is not None and infAdic.text:
-                                textos_infcpl[(loja_xml, forn_macro)] = infAdic.text
-
-                            for det in inf.findall('nfe:det', NAMESPACE_NFE):
-                                prod_node = det.find('nfe:prod/nfe:xProd', NAMESPACE_NFE)
-                                cod_node = det.find('nfe:prod/nfe:cProd', NAMESPACE_NFE)
-                                qtd_node = det.find('nfe:prod/nfe:qCom', NAMESPACE_NFE)
-                                
-                                if prod_node is None or qtd_node is None: continue
-                                
-                                cod_xml = cod_node.text.strip() if cod_node is not None else ""
-                                qtd_xml = float(qtd_node.text)
-
-                                origem_match = "XML (Fuzzy)"
-                                nome_final = normalizar(prod_node.text)
-                                qtd_final = qtd_xml
-                                
-                                if (cnpj_forn, cod_xml) in dict_depara:
-                                    desc_interna, fator = dict_depara[(cnpj_forn, cod_xml)]
-                                    nome_final = normalizar(desc_interna)
-                                    qtd_final = qtd_xml * fator
-                                    origem_match = "De-Para ⚡"
-
-                                notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": nome_final, "Qtd": qtd_final, "Origem": origem_match})
-                        except: pass
+                    # O Controller assume o comando total aqui. Nada de regras soltas.
+                    controller = AuditoriaController()
+                    df_final = controller.executar_auditoria(arquivo_excel, arquivos_xml, usar_ia)
                     
-                    df_notas = pd.DataFrame(notas)
-                    if not df_notas.empty:
-                        df_notas_agg = df_notas.groupby(['Loja', 'Fornecedor_Macro', 'Produto', 'Origem'], as_index=False)['Qtd'].sum()
-                    else: df_notas_agg = pd.DataFrame()
-
-                    # 4. CRUZAMENTO
-                    registros = []
-                    if not df_pedidos.empty:
-                        for (loja, forn_macro), df_ped_group in df_pedidos.groupby(['Loja', 'Fornecedor_Macro']):
-                            notas_forn = df_notas_agg[(df_notas_agg['Loja'] == loja) & (df_notas_agg['Fornecedor_Macro'] == forn_macro)] if not df_notas_agg.empty else pd.DataFrame()
-                            infcpl_nota = textos_infcpl.get((loja, forn_macro), "")
-
-                            if notas_forn.empty:
-                                for _, ped in df_ped_group.iterrows():
-                                    stat_v, stat_c, dif = classificar(ped['Qtd'], 0, "SEM_FORNECEDOR")
-                                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NÃO ENCONTRADA", ped['Qtd'], 0, "-", dif, stat_v, stat_c, "", "-", "-", "⚪ SEM CONTAGEM", 0.0))
-                                continue
-
-                            matched_ped_idx, matched_xml_idx, pairs = set(), set(), []
-                            for idx_ped, ped in df_ped_group.iterrows():
-                                for idx_xml, nota in notas_forn.iterrows():
-                                    pairs.append((fuzz.token_sort_ratio(ped['Produto'], nota['Produto']), idx_ped, idx_xml, nota['Produto'], ped['Qtd'], nota['Qtd'], nota['Origem']))
-                            
-                            pairs.sort(key=lambda x: x[0], reverse=True) 
-                            for score, idx_ped, idx_xml, prod_xml, qtd_ped, qtd_fat, origem_m in pairs:
-                                if idx_ped not in matched_ped_idx and idx_xml not in matched_xml_idx:
-                                    matched_ped_idx.add(idx_ped); matched_xml_idx.add(idx_xml)
-                                    ped = df_ped_group.loc[idx_ped]
-                                    stat_v, stat_c, dif = classificar(qtd_ped, qtd_fat, "OK")
-                                    
-                                    just_ia = ""
-                                    if "🔴 NFe FALTA" in stat_v and usar_ia:
-                                        justificado, just_texto = analisar_com_ia(ped['Produto'], dif, infcpl_nota)
-                                        if justificado: stat_v = f"🤖 JUSTIFICADO (Faltou {abs(dif):.0f})"
-                                        just_ia = just_texto
-                                    
-                                    registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], prod_xml, qtd_ped, qtd_fat, origem_m, dif, stat_v, stat_c, just_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
-
-                    if registros:
-                        df_final = pd.DataFrame(registros, columns=[
-                            'loja','fornecedor','produto_pedido','produto_xml',
-                            'qtd_pedido','qtd_nota', 'origem_match', 'diferenca','status_visual','status_codigo',
-                            'justificativa_ia', 'qtd_fisico', 'padrao_fisico', 'status_doca', 'diferenca_doca'
-                        ])
-                        
+                    if not df_final.empty:
                         wb_audit = gerar_excel_auditoria(df_final)
                         out_audit = io.BytesIO()
                         wb_audit.save(out_audit)
-                        st.success("Auditoria Concluída com Precisão Cirúrgica!")
+                        st.success("✅ Auditoria Concluída com Precisão Estrutural (MVC Aplicado)!")
                         st.download_button(label="📥 Baixar Auditoria", data=out_audit.getvalue(), file_name=f"Auditoria_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx")
-                    else: st.error("❌ Nenhum dado cruzado.")
+                    else:
+                        st.error("❌ Nenhum dado cruzado.")
                 except Exception as e:
-                    st.error(f"❌ Erro crítico: {e}")
+                    st.error(f"❌ Erro crítico no fluxo do Controller: {e}")
 
 # ----------------------------------------------------------
-# TELA 3: GESTÃO DE PRODUTOS (BLINDADA CONTRA INJEÇÃO)
+# TELA 3: GESTÃO DE PRODUTOS (Mantida Fiel ao Original)
 # ----------------------------------------------------------
 with aba_gestao:
     st.header("⚙️ Painel de Gestão: Dicionário De-Para")
     
-    # Sistema de Login Seguro
-    if "autenticado" not in st.session_state:
-        st.session_state["autenticado"] = False
+    if "autenticado" not in st.session_state: st.session_state["autenticado"] = False
 
     if not st.session_state["autenticado"]:
         senha_digitada = st.text_input("🔑 Senha de Acesso do Comprador", type="password")
-        senha_correta = st.secrets.get("SENHA_GESTOR", "TomeLeve123") # Fallback se esquecer de por no secrets
+        senha_correta = st.secrets.get("SENHA_GESTOR", "TomeLeve123")
         
         if st.button("Destrancar Cofre"):
             if senha_digitada == senha_correta:
                 st.session_state["autenticado"] = True
                 st.rerun()
-            else:
-                st.error("❌ Acesso Negado. Senha incorreta.")
+            else: st.error("❌ Acesso Negado. Senha incorreta.")
     else:
         st.success("🔓 Cofre Aberto! Você está editando direto no PostgreSQL.")
         if st.button("🔒 Bloquear Painel"):
@@ -465,8 +502,6 @@ with aba_gestao:
             st.rerun()
 
         st.markdown("---")
-        
-        # Módulo de Adição de Novo Produto
         st.subheader("➕ Cadastrar / Atualizar Produto")
         with st.form("form_gestao"):
             colA, colB = st.columns(2)
@@ -489,7 +524,6 @@ with aba_gestao:
                     try:
                         conn_insert = get_db_connection()
                         cursor = conn_insert.cursor()
-                        # Query Parametrizada: 100% Imune a SQL Injection!
                         query = """
                             INSERT INTO depara_flv (cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, cod_interno, descricao_interna, fator_conversao)
                             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -505,21 +539,17 @@ with aba_gestao:
                         conn_insert.commit()
                         cursor.close()
                         st.success(f"✅ Produto {f_desc_int} salvo com sucesso no banco de dados!")
-                    except Exception as e:
-                        st.error(f"Erro ao salvar: {e}")
+                    except Exception as e: st.error(f"Erro ao salvar: {e}")
                     finally:
-                        if conn_insert is not None:
-                            conn_insert.close()
+                        if conn_insert is not None: conn_insert.close()
 
         st.markdown("---")
         st.subheader("📋 Tabela Atual (No Banco de Dados)")
-        if st.button("🔄 Atualizar Visualização"):
-            st.rerun()
+        if st.button("🔄 Atualizar Visualização"): st.rerun()
             
         conn_view = None
         try:
             conn_view = get_db_connection()
-            # --- NOVO BLOCO DE LEITURA BLINDADO ---
             cursor = conn_view.cursor()
             cursor.execute("""
                 SELECT cnpj_fornecedor, fornecedor, cod_produto_xml, descricao_xml, 
@@ -529,7 +559,6 @@ with aba_gestao:
             """)
             dados_tabela = cursor.fetchall()
             
-            # Criando nomes bonitos para as colunas na tela
             colunas_tabela = [
                 "CNPJ Fornecedor", "Fornecedor", "Cód XML", "Descrição XML", 
                 "Cód Interno", "Descrição Interna", "Fator Conversão"
@@ -538,14 +567,10 @@ with aba_gestao:
             df_view = pd.DataFrame(dados_tabela, columns=colunas_tabela)
             cursor.close()
             st.dataframe(df_view, use_container_width=True)
-            # --------------------------------------
-        except Exception as e:
-            st.error(f"Não foi possível carregar a tabela: {e}")
+        except Exception as e: st.error(f"Não foi possível carregar a tabela: {e}")
         finally:
-            if conn_view is not None:
-                conn_view.close()
+            if conn_view is not None: conn_view.close()
                 
-        # Módulo de Exclusão Segura
         st.markdown("---")
         st.subheader("🗑️ Excluir Regra Mapeada")
         ex_cnpj = st.text_input("CNPJ Fornecedor (Para excluir)")
@@ -559,8 +584,6 @@ with aba_gestao:
                 conn_ex.commit()
                 cursor_ex.close()
                 st.success("Regra deletada! Atualize a visualização para confirmar.")
-            except Exception as e:
-                st.error(f"Erro ao excluir regra: {e}")
+            except Exception as e: st.error(f"Erro ao excluir regra: {e}")
             finally:
-                if conn_ex is not None:
-                    conn_ex.close()
+                if conn_ex is not None: conn_ex.close()
