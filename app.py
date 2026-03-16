@@ -164,10 +164,10 @@ class NFeRepository:
 
                     notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": nome_final, "Qtd": qtd_final, "Origem": origem_match})
             except Exception as e: 
-                # Adicionei este print também para garantir que nenhum erro silencioso passe despercebido
                 print(f"Erro ao ler um XML: {e}")
                 pass
         return pd.DataFrame(notas), textos_infcpl
+
 class PedidoRepository:
     def extrair_pedidos_excel(self, arquivo_excel, mapping_forn):
         df_pedidos_raw = pd.read_excel(arquivo_excel, sheet_name=None, header=None)
@@ -354,8 +354,157 @@ def gerar_excel_auditoria(df_final):
 aba_preparador, aba_auditoria, aba_gestao = st.tabs(["🧹 1. Preparador", "🍎 2. Auditoria DB", "⚙️ 3. Gestão De-Para"])
 
 with aba_preparador:
-    st.header("🧹 Preparador de Planilha do Comprador")
-    st.info("O código visual desta aba permanece intacto conforme original (omitido por espaço, cole aqui o bloco do preparador original se desejar testá-lo).")
+    st.header("🧹 Preparador de Planilha do Comprador (FLV)")
+    st.markdown("Filtra os pedidos não solicitados, separa por loja e fornecedor e gera o formato Padrão Sauron.")
+
+    arquivo_flv_bruto = st.file_uploader("📂 Arraste a planilha de Pedidos FLV (Matriz Comercial)", type=["xlsx", "xls", "csv"], key="up_preparador")
+
+    if arquivo_flv_bruto:
+        if st.button("⚙️ Processar, Limpar e Roteirizar Pedidos"):
+            with st.spinner("Decodificando matriz complexa de pedidos da área comercial..."):
+                try:
+                    fuso_br = timezone(timedelta(hours=-3))
+
+                    if arquivo_flv_bruto.name.endswith('.csv'):
+                        df_raw = pd.read_csv(arquivo_flv_bruto, header=None, low_memory=False)
+                    else:
+                        df_raw = pd.read_excel(arquivo_flv_bruto, header=None)
+
+                    records = []
+                    current_forn = "FORNECEDOR INDEFINIDO"
+                    stores_cols = {}
+                    padrao_col = None
+
+                    # Motor de Varredura Furtiva (Sensível a Padrões, não a posições fixas)
+                    for idx, row in df_raw.iterrows():
+                        col0 = str(row[0]).strip().upper()
+                        
+                        # 1. Captura o título do Fornecedor
+                        if col0.startswith("PEDIDO FLV"):
+                            current_forn = str(row[0]).strip().replace("PEDIDO FLV", "").strip()
+                            continue
+                        
+                        # 2. Varredura Inteligente: Detecta a linha que contém as Lojas (L1, L2...)
+                        is_mapping_row = False
+                        for val in row.values:
+                            val_str = str(val).strip().upper()
+                            if val_str.startswith("L") and val_str[1:].isdigit():
+                                is_mapping_row = True
+                                break
+                        
+                        if is_mapping_row:
+                            stores_cols = {}
+                            padrao_col = None
+                            for c_idx, val in enumerate(row.values):
+                                val_str = str(val).strip().upper()
+                                if val_str.startswith("L") and val_str[1:].isdigit():
+                                    stores_cols[c_idx] = val_str
+                                elif "PADRÃO" in val_str or "PADRAO" in val_str:
+                                    padrao_col = c_idx
+                            continue
+                        
+                        # 3. Pula linhas secundárias de cabeçalho do ERP ("CODIGO", "DESCRIÇÃO", etc)
+                        if col0 in ["CÓDIGO", "CODIGO", "CÓD. FORN.", "CÓD. FORN"]:
+                            continue
+                        
+                        # 4. Processamento de Produtos (Apenas se a coluna 0 for numérica)
+                        if str(row[0]).replace('.', '').isdigit():
+                            produto = str(row[1]).strip()
+                            if not produto or produto.upper() == "NAN": continue
+                            
+                            # Extração Segura do Peso Padrão da Caixa (Assume 1kg se falhar)
+                            padrao = 1.0
+                            if padrao_col is not None and pd.notna(row.iloc[padrao_col]):
+                                val_padrao = str(row.iloc[padrao_col]).replace(',', '.').strip()
+                                match_padrao = re.search(r'[\d\.]+', val_padrao)
+                                if match_padrao:
+                                    try: padrao = float(match_padrao.group())
+                                    except: pass
+                            
+                            # Roteamento Apenas do Solicitado (> 0)
+                            for c_idx, loja in stores_cols.items():
+                                val = row.iloc[c_idx]
+                                if pd.notna(val) and str(val).strip() != "":
+                                    try:
+                                        qtd_cx = float(str(val).replace(',', '.'))
+                                        if qtd_cx > 0:
+                                            records.append({
+                                                "Loja": loja.strip(),
+                                                "Fornecedor": current_forn,
+                                                "Produto": produto,
+                                                "Qtd_Cx": qtd_cx,
+                                                "Padrao": padrao,
+                                                "Qtd_KG": round(qtd_cx * padrao, 2)
+                                            })
+                                    except: pass
+
+                    if not records:
+                        st.error("❌ O robô não encontrou pedidos. Verifique se o formato bate com a leitura matricial.")
+                        st.stop()
+
+                    df_pedidos = pd.DataFrame(records)
+
+                    # Construção Visual do Excel (Padrão Sauron)
+                    wb = Workbook()
+                    wb.remove(wb.active)
+                    data_hoje = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
+
+                    # Estilização
+                    header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
+                    forn_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+                    font_branca = Font(color="FFFFFF", bold=True)
+                    font_forn = Font(color="002060", bold=True)
+                    align_center = Alignment(horizontal="center", vertical="center")
+
+                    lojas_encontradas = sorted(df_pedidos['Loja'].unique())
+
+                    for loja in lojas_encontradas:
+                        ws = wb.create_sheet(title=loja)
+                        
+                        # Cabeçalho Principal (Com Fuso Horário)
+                        ws.append([f"PEDIDOS - LOJA {loja} - GERADO EM: {data_hoje}"])
+                        ws.merge_cells('A1:E1')
+                        ws['A1'].fill = header_fill
+                        ws['A1'].font = font_branca
+                        ws['A1'].alignment = align_center
+
+                        ws.append(["CÓD", "PRODUTO", "QTD (CAIXAS)", "PADRÃO (KG)", "TOTAL (KG)"])
+                        for cell in ws[2]: 
+                            cell.font = Font(bold=True)
+                            cell.alignment = align_center
+
+                        df_loja = df_pedidos[df_pedidos['Loja'] == loja]
+                        
+                        for fornecedor in sorted(df_loja['Fornecedor'].unique()):
+                            ws.append([f"Fornecedor: {fornecedor}", "", "", "", ""])
+                            ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=5)
+                            for cell in ws[ws.max_row]:
+                                cell.fill = forn_fill
+                                cell.font = font_forn
+                            
+                            df_forn = df_loja[df_loja['Fornecedor'] == fornecedor]
+                            for _, r in df_forn.iterrows():
+                                ws.append(["", r['Produto'], r['Qtd_Cx'], r['Padrao'], r['Qtd_KG']])
+                        
+                        ws.column_dimensions['A'].width = 15
+                        ws.column_dimensions['B'].width = 45
+                        ws.column_dimensions['C'].width = 15
+                        ws.column_dimensions['D'].width = 15
+                        ws.column_dimensions['E'].width = 15
+
+                    out_io = io.BytesIO()
+                    wb.save(out_io)
+                    
+                    st.success(f"✅ Matriz Furtiva Concluída! {len(df_pedidos)} itens de múltiplos fornecedores roteirizados para {len(lojas_encontradas)} lojas.")
+                    st.download_button(
+                        label="📥 Baixar Pedidos Tratados (Pronto p/ Auditoria)",
+                        data=out_io.getvalue(),
+                        file_name=f"Pedidos_FLV_Formatado_{datetime.now(fuso_br).strftime('%d_%m')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                except Exception as e:
+                    st.error(f"Erro na extração dos dados comerciais: {e}")
 
 with aba_auditoria:
     st.header("🍎 Cruzamento Triplo via Neon DB")
@@ -388,4 +537,3 @@ with aba_auditoria:
 with aba_gestao:
     st.header("⚙️ Painel de Gestão (De-Para)")
     st.info("A gestão do dicionário De-Para continua a operar no banco de forma segura. O código desta aba permanece igual ao original.")
-
