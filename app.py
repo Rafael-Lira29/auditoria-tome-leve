@@ -355,14 +355,21 @@ aba_preparador, aba_auditoria, aba_gestao = st.tabs(["🧹 1. Preparador", "🍎
 
 with aba_preparador:
     st.header("🧹 Preparador de Planilha do Comprador (FLV)")
-    st.markdown("Filtra os pedidos não solicitados, separa por loja e fornecedor e gera o formato Padrão Sauron.")
+    st.markdown("Filtra pedidos não solicitados e gera o formato EXATO para a Doca e Auditoria.")
 
     arquivo_flv_bruto = st.file_uploader("📂 Arraste a planilha de Pedidos FLV (Matriz Comercial)", type=["xlsx", "xls", "csv"], key="up_preparador")
 
     if arquivo_flv_bruto:
         if st.button("⚙️ Processar, Limpar e Roteirizar Pedidos"):
-            with st.spinner("Decodificando matriz complexa de pedidos da área comercial..."):
+            with st.spinner("Blindando estrutura para os sistemas de Doca e Auditoria..."):
                 try:
+                    import io
+                    import re
+                    from datetime import datetime, timedelta, timezone
+                    from openpyxl import Workbook
+                    from openpyxl.styles import PatternFill, Font, Alignment
+
+                    # Fuso horário cravado no Brasil (UTC-3)
                     fuso_br = timezone(timedelta(hours=-3))
 
                     if arquivo_flv_bruto.name.endswith('.csv'):
@@ -371,20 +378,26 @@ with aba_preparador:
                         df_raw = pd.read_excel(arquivo_flv_bruto, header=None)
 
                     records = []
-                    current_forn = "FORNECEDOR INDEFINIDO"
+                    current_forn_name = "INDEFINIDO"
+                    current_forn_code = "000000"
                     stores_cols = {}
                     padrao_col = None
+                    custo_col = None
 
-                    # Motor de Varredura Furtiva (Sensível a Padrões, não a posições fixas)
+                    # Motor de Varredura Furtiva
                     for idx, row in df_raw.iterrows():
                         col0 = str(row[0]).strip().upper()
                         
-                        # 1. Captura o título do Fornecedor
+                        # 1. Captura o Nome do Fornecedor
                         if col0.startswith("PEDIDO FLV"):
-                            current_forn = str(row[0]).strip().replace("PEDIDO FLV", "").strip()
+                            current_forn_name = str(row[0]).strip().replace("PEDIDO FLV", "").strip()
                             continue
                         
-                        # 2. Varredura Inteligente: Detecta a linha que contém as Lojas (L1, L2...)
+                        # Captura o Código do Fornecedor (Proteção caso esteja antes ou na linha do L1)
+                        if col0 in ["CÓD. FORN.", "CÓD. FORN", "CÓDIGO FORNECEDOR", "CÓD.FORN"]:
+                            current_forn_code = str(row[1]).strip()
+                        
+                        # 2. Varredura Inteligente: Detecta a linha L1, L2, Padrão e Custo
                         is_mapping_row = False
                         for val in row.values:
                             val_str = str(val).strip().upper()
@@ -395,30 +408,48 @@ with aba_preparador:
                         if is_mapping_row:
                             stores_cols = {}
                             padrao_col = None
+                            custo_col = None
                             for c_idx, val in enumerate(row.values):
                                 val_str = str(val).strip().upper()
                                 if val_str.startswith("L") and val_str[1:].isdigit():
-                                    stores_cols[c_idx] = val_str
+                                    num_loja = val_str.replace("L", "").strip()
+                                    stores_cols[c_idx] = num_loja
                                 elif "PADRÃO" in val_str or "PADRAO" in val_str:
                                     padrao_col = c_idx
+                                elif "CUSTO" in val_str:
+                                    custo_col = c_idx
+                            
+                            # Reforço: se a linha de mapeamento for a mesma do Cód. Forn
+                            if col0 in ["CÓD. FORN.", "CÓD. FORN", "CÓDIGO FORNECEDOR", "CÓD.FORN"]:
+                                current_forn_code = str(row[1]).strip()
                             continue
                         
-                        # 3. Pula linhas secundárias de cabeçalho do ERP ("CODIGO", "DESCRIÇÃO", etc)
-                        if col0 in ["CÓDIGO", "CODIGO", "CÓD. FORN.", "CÓD. FORN"]:
+                        # 3. Pula linhas secundárias de cabeçalho do ERP ("CODIGO", "DESCRIÇÃO")
+                        if col0 in ["CÓDIGO", "CODIGO", "DESCRIÇÃO", "DESCRICAO"]:
                             continue
                         
-                        # 4. Processamento de Produtos (Apenas se a coluna 0 for numérica)
-                        if str(row[0]).replace('.', '').isdigit():
+                        # 4. Processamento de Produtos (Coluna 0 = Código, Coluna 1 = Descrição)
+                        if str(row[0]).replace('.', '').isdigit() and pd.notna(row[1]):
+                            codigo_prod = str(row[0]).strip()
                             produto = str(row[1]).strip()
                             if not produto or produto.upper() == "NAN": continue
                             
-                            # Extração Segura do Peso Padrão da Caixa (Assume 1kg se falhar)
+                            # Extração Segura do Peso Padrão da Caixa
                             padrao = 1.0
                             if padrao_col is not None and pd.notna(row.iloc[padrao_col]):
                                 val_padrao = str(row.iloc[padrao_col]).replace(',', '.').strip()
                                 match_padrao = re.search(r'[\d\.]+', val_padrao)
                                 if match_padrao:
                                     try: padrao = float(match_padrao.group())
+                                    except: pass
+
+                            # Extração Segura do Custo
+                            custo = 0.0
+                            if custo_col is not None and pd.notna(row.iloc[custo_col]):
+                                val_custo = str(row.iloc[custo_col]).replace(',', '.').strip()
+                                match_custo = re.search(r'[\d\.]+', val_custo)
+                                if match_custo:
+                                    try: custo = float(match_custo.group())
                                     except: pass
                             
                             # Roteamento Apenas do Solicitado (> 0)
@@ -429,77 +460,97 @@ with aba_preparador:
                                         qtd_cx = float(str(val).replace(',', '.'))
                                         if qtd_cx > 0:
                                             records.append({
-                                                "Loja": loja.strip(),
-                                                "Fornecedor": current_forn,
-                                                "Produto": produto,
+                                                "Loja": loja,
+                                                "Fornecedor_Cod": current_forn_code,
+                                                "Fornecedor_Nome": current_forn_name,
+                                                "Produto_Cod": codigo_prod,
+                                                "Produto_Desc": produto,
                                                 "Qtd_Cx": qtd_cx,
                                                 "Padrao": padrao,
-                                                "Qtd_KG": round(qtd_cx * padrao, 2)
+                                                "Custo": custo
                                             })
                                     except: pass
 
                     if not records:
-                        st.error("❌ O robô não encontrou pedidos. Verifique se o formato bate com a leitura matricial.")
+                        st.error("❌ O robô não encontrou pedidos válidos.")
                         st.stop()
 
                     df_pedidos = pd.DataFrame(records)
 
-                    # Construção Visual do Excel (Padrão Sauron)
+                    # Construção Visual do Excel (Compatibilidade Estrita Doca/Sauron)
                     wb = Workbook()
                     wb.remove(wb.active)
-                    data_hoje = datetime.now(fuso_br).strftime("%d/%m/%Y %H:%M")
+                    data_hoje = datetime.now(fuso_br).strftime("%d/%m/%Y")
 
-                    # Estilização
                     header_fill = PatternFill(start_color="002060", end_color="002060", fill_type="solid")
                     forn_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
                     font_branca = Font(color="FFFFFF", bold=True)
                     font_forn = Font(color="002060", bold=True)
                     align_center = Alignment(horizontal="center", vertical="center")
+                    align_left = Alignment(horizontal="left", vertical="center")
 
-                    lojas_encontradas = sorted(df_pedidos['Loja'].unique())
+                    # Lojas ordenadas numericamente (1, 2, 3...)
+                    lojas_encontradas = sorted(df_pedidos['Loja'].unique(), key=lambda x: int(x) if str(x).isdigit() else str(x))
 
                     for loja in lojas_encontradas:
-                        ws = wb.create_sheet(title=loja)
+                        ws = wb.create_sheet(title=f"Loja_{loja}")
                         
-                        # Cabeçalho Principal (Com Fuso Horário)
-                        ws.append([f"PEDIDOS - LOJA {loja} - GERADO EM: {data_hoje}"])
-                        ws.merge_cells('A1:E1')
+                        # Linha 1: Fuso Horário e Identificação (Layout Doca)
+                        ws.append([f"CONFERÊNCIA - LOJA {loja}", "", "", "", f"Data: {data_hoje}"])
+                        ws.merge_cells('A1:C1')
                         ws['A1'].fill = header_fill
                         ws['A1'].font = font_branca
-                        ws['A1'].alignment = align_center
+                        ws['A1'].alignment = align_left
+                        ws['E1'].fill = header_fill
+                        ws['E1'].font = font_branca
+                        ws['E1'].alignment = align_center
 
-                        ws.append(["CÓD", "PRODUTO", "QTD (CAIXAS)", "PADRÃO (KG)", "TOTAL (KG)"])
+                        # Linha 2: Cabeçalhos Fixos Exigidos pelos Sistemas Conectados
+                        ws.append(["Código", "Descrição", "Qtd_Pedida", "Padrão_Cx", "Custo"])
                         for cell in ws[2]: 
                             cell.font = Font(bold=True)
                             cell.alignment = align_center
 
                         df_loja = df_pedidos[df_pedidos['Loja'] == loja]
                         
-                        for fornecedor in sorted(df_loja['Fornecedor'].unique()):
-                            ws.append([f"Fornecedor: {fornecedor}", "", "", "", ""])
+                        # Agrupar Fornecedores (mantendo Código e Nome integrados)
+                        df_loja['Forn_Full'] = df_loja['Fornecedor_Cod'].astype(str) + " - " + df_loja['Fornecedor_Nome']
+                        
+                        for fornecedor_str in sorted(df_loja['Forn_Full'].unique()):
+                            # Linha de Fornecedor Protegida
+                            ws.append([f"Fornecedor: {fornecedor_str}", "", "", "", ""])
                             ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=5)
                             for cell in ws[ws.max_row]:
                                 cell.fill = forn_fill
                                 cell.font = font_forn
+                                cell.alignment = align_left
                             
-                            df_forn = df_loja[df_loja['Fornecedor'] == fornecedor]
+                            # Produtos do Fornecedor
+                            df_forn = df_loja[df_loja['Forn_Full'] == fornecedor_str]
                             for _, r in df_forn.iterrows():
-                                ws.append(["", r['Produto'], r['Qtd_Cx'], r['Padrao'], r['Qtd_KG']])
+                                # Tratamento numérico para excel limpo
+                                cod_p = int(float(r['Produto_Cod'])) if str(r['Produto_Cod']).replace('.', '').isdigit() else r['Produto_Cod']
+                                qtd_c = int(r['Qtd_Cx']) if r['Qtd_Cx'].is_integer() else r['Qtd_Cx']
+                                pad_c = int(r['Padrao']) if r['Padrao'].is_integer() else r['Padrao']
+                                cst_c = r['Custo']
+                                
+                                ws.append([cod_p, r['Produto_Desc'], qtd_c, pad_c, cst_c])
                         
+                        # Calibração Visual
                         ws.column_dimensions['A'].width = 15
                         ws.column_dimensions['B'].width = 45
                         ws.column_dimensions['C'].width = 15
                         ws.column_dimensions['D'].width = 15
-                        ws.column_dimensions['E'].width = 15
+                        ws.column_dimensions['E'].width = 12
 
                     out_io = io.BytesIO()
                     wb.save(out_io)
                     
-                    st.success(f"✅ Matriz Furtiva Concluída! {len(df_pedidos)} itens de múltiplos fornecedores roteirizados para {len(lojas_encontradas)} lojas.")
+                    st.success(f"✅ Matriz Furtiva Concluída! Estrutura conectada e blindada para Doca e Auditoria.")
                     st.download_button(
-                        label="📥 Baixar Pedidos Tratados (Pronto p/ Auditoria)",
+                        label="📥 Baixar Pedidos Formatados",
                         data=out_io.getvalue(),
-                        file_name=f"Pedidos_FLV_Formatado_{datetime.now(fuso_br).strftime('%d_%m')}.xlsx",
+                        file_name=f"Pedidos_Blindados_FLV_{datetime.now(fuso_br).strftime('%d_%m')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
 
