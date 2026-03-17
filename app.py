@@ -361,7 +361,7 @@ with aba_preparador:
 
     if arquivo_flv_bruto:
         if st.button("⚙️ Processar, Limpar e Roteirizar Pedidos"):
-            with st.spinner("Blindando estrutura para os sistemas de Doca e Auditoria..."):
+            with st.spinner("Varredura Omnidirecional: Escaneando todas as abas e blindando estrutura..."):
                 try:
                     import io
                     import re
@@ -369,115 +369,115 @@ with aba_preparador:
                     from openpyxl import Workbook
                     from openpyxl.styles import PatternFill, Font, Alignment
 
-                    # Fuso horário cravado no Brasil (UTC-3)
                     fuso_br = timezone(timedelta(hours=-3))
 
                     if arquivo_flv_bruto.name.endswith('.csv'):
-                        df_raw = pd.read_csv(arquivo_flv_bruto, header=None, low_memory=False)
+                        dfs = [pd.read_csv(arquivo_flv_bruto, header=None, low_memory=False)]
                     else:
-                        df_raw = pd.read_excel(arquivo_flv_bruto, header=None)
+                        excel_dict = pd.read_excel(arquivo_flv_bruto, sheet_name=None, header=None)
+                        dfs = list(excel_dict.values())
 
                     records = []
-                    current_forn_name = "INDEFINIDO"
-                    current_forn_code = "000000"
-                    stores_cols = {}
-                    padrao_col = None
-                    custo_col = None
 
-                    # Motor de Varredura Furtiva
-                    for idx, row in df_raw.iterrows():
-                        col0 = str(row[0]).strip().upper()
-                        
-                        # 1. Captura o Nome do Fornecedor
-                        if col0.startswith("PEDIDO FLV"):
-                            current_forn_name = str(row[0]).strip().replace("PEDIDO FLV", "").strip()
-                            continue
-                        
-                        # Captura o Código do Fornecedor (Proteção caso esteja antes ou na linha do L1)
-                        if col0 in ["CÓD. FORN.", "CÓD. FORN", "CÓDIGO FORNECEDOR", "CÓD.FORN"]:
-                            current_forn_code = str(row[1]).strip()
-                        
-                        # 2. Varredura Inteligente: Detecta a linha L1, L2, Padrão e Custo
-                        is_mapping_row = False
-                        for val in row.values:
-                            val_str = str(val).strip().upper()
-                            if val_str.startswith("L") and val_str[1:].isdigit():
-                                is_mapping_row = True
-                                break
-                        
-                        if is_mapping_row:
-                            stores_cols = {}
-                            padrao_col = None
-                            custo_col = None
-                            for c_idx, val in enumerate(row.values):
+                    for df_raw in dfs:
+                        current_forn_name = "INDEFINIDO"
+                        current_forn_code = "000000"
+                        stores_cols = {}
+                        padrao_col = None
+                        custo_col = None
+
+                        for idx, row in df_raw.iterrows():
+                            col0 = str(row[0]).strip().upper()
+                            
+                            if col0.startswith("PEDIDO FLV"):
+                                current_forn_name = str(row[0]).strip().replace("PEDIDO FLV", "").strip()
+                                continue
+                            
+                            if col0.startswith("CÓD. FORN") or col0.startswith("CÓDIGO FORN") or col0.startswith("CODIGO FORN"):
+                                val_forn = str(row[1]).strip()
+                                if val_forn and val_forn.upper() != "NAN":
+                                    current_forn_code = val_forn
+                            
+                            is_mapping_row = False
+                            for val in row.values:
                                 val_str = str(val).strip().upper()
-                                if val_str.startswith("L") and val_str[1:].isdigit():
-                                    num_loja = val_str.replace("L", "").strip()
-                                    stores_cols[c_idx] = num_loja
-                                elif "PADRÃO" in val_str or "PADRAO" in val_str:
-                                    padrao_col = c_idx
-                                elif "CUSTO" in val_str:
-                                    custo_col = c_idx
+                                if val_str.startswith("L") and val_str.replace("L", "").strip().isdigit():
+                                    is_mapping_row = True
+                                    break
                             
-                            # Reforço: se a linha de mapeamento for a mesma do Cód. Forn
-                            if col0 in ["CÓD. FORN.", "CÓD. FORN", "CÓDIGO FORNECEDOR", "CÓD.FORN"]:
-                                current_forn_code = str(row[1]).strip()
-                            continue
-                        
-                        # 3. Pula linhas secundárias de cabeçalho do ERP ("CODIGO", "DESCRIÇÃO")
-                        if col0 in ["CÓDIGO", "CODIGO", "DESCRIÇÃO", "DESCRICAO"]:
-                            continue
-                        
-                        # 4. Processamento de Produtos (Coluna 0 = Código, Coluna 1 = Descrição)
-                        if str(row[0]).replace('.', '').isdigit() and pd.notna(row[1]):
-                            codigo_prod = str(row[0]).strip()
-                            produto = str(row[1]).strip()
-                            if not produto or produto.upper() == "NAN": continue
+                            if is_mapping_row:
+                                stores_cols = {}
+                                padrao_col = None
+                                custo_col = None
+                                for c_idx, val in enumerate(row.values):
+                                    val_str = str(val).strip().upper()
+                                    if val_str.startswith("L") and val_str.replace("L", "").strip().isdigit():
+                                        num_loja = val_str.replace("L", "").strip()
+                                        stores_cols[c_idx] = num_loja
+                                    elif "PADRÃO" in val_str or "PADRAO" in val_str or "CX" in val_str:
+                                        padrao_col = c_idx
+                                    elif "CUSTO" in val_str:
+                                        custo_col = c_idx
+                                
+                                if col0.startswith("CÓD. FORN") or col0.startswith("CÓDIGO FORN"):
+                                    val_forn = str(row[1]).strip()
+                                    if val_forn and val_forn.upper() != "NAN":
+                                        current_forn_code = val_forn
+                                continue
                             
-                            # Extração Segura do Peso Padrão da Caixa
-                            padrao = 1.0
-                            if padrao_col is not None and pd.notna(row.iloc[padrao_col]):
-                                val_padrao = str(row.iloc[padrao_col]).replace(',', '.').strip()
-                                match_padrao = re.search(r'[\d\.]+', val_padrao)
-                                if match_padrao:
-                                    try: padrao = float(match_padrao.group())
-                                    except: pass
+                            col1 = str(row[1]).strip().upper() if len(row) > 1 else "NAN"
+                            
+                            if col0 and col0 != "NAN" and col1 and col1 != "NAN":
+                                ignore_list = ["PEDIDO FLV", "PEDIDO HORTIFRUT", "CÓD", "CODIGO", "CÓDIGO", "DESCRIÇÃO", "DESCRICAO", "TOTAL", "MÉDIA", "MEDIA", "FORNECEDOR", "ESTOQUE"]
+                                
+                                if not any(col0.startswith(x) for x in ignore_list):
+                                    codigo_prod = str(row[0]).strip()
+                                    produto = str(row[1]).strip()
+                                    
+                                    padrao = 1.0
+                                    if padrao_col is not None and pd.notna(row.iloc[padrao_col]):
+                                        val_padrao = str(row.iloc[padrao_col]).replace(',', '.').strip()
+                                        match_padrao = re.search(r'[\d\.]+', val_padrao)
+                                        if match_padrao:
+                                            try: padrao = float(match_padrao.group())
+                                            except: pass
 
-                            # Extração Segura do Custo
-                            custo = 0.0
-                            if custo_col is not None and pd.notna(row.iloc[custo_col]):
-                                val_custo = str(row.iloc[custo_col]).replace(',', '.').strip()
-                                match_custo = re.search(r'[\d\.]+', val_custo)
-                                if match_custo:
-                                    try: custo = float(match_custo.group())
-                                    except: pass
-                            
-                            # Roteamento Apenas do Solicitado (> 0)
-                            for c_idx, loja in stores_cols.items():
-                                val = row.iloc[c_idx]
-                                if pd.notna(val) and str(val).strip() != "":
-                                    try:
-                                        qtd_cx = float(str(val).replace(',', '.'))
-                                        if qtd_cx > 0:
-                                            records.append({
-                                                "Loja": loja,
-                                                "Fornecedor_Cod": current_forn_code,
-                                                "Fornecedor_Nome": current_forn_name,
-                                                "Produto_Cod": codigo_prod,
-                                                "Produto_Desc": produto,
-                                                "Qtd_Cx": qtd_cx,
-                                                "Padrao": padrao,
-                                                "Custo": custo
-                                            })
-                                    except: pass
+                                    custo = 0.0
+                                    if custo_col is not None and pd.notna(row.iloc[custo_col]):
+                                        val_custo = str(row.iloc[custo_col]).replace(',', '.').strip()
+                                        match_custo = re.search(r'[\d\.]+', val_custo)
+                                        if match_custo:
+                                            try: custo = float(match_custo.group())
+                                            except: pass
+                                    
+                                    for c_idx, loja in stores_cols.items():
+                                        val = row.iloc[c_idx]
+                                        if pd.notna(val) and str(val).strip() != "":
+                                            try:
+                                                qtd_cx = float(str(val).replace(',', '.'))
+                                                if qtd_cx > 0:
+                                                    records.append({
+                                                        "Loja": loja,
+                                                        "Fornecedor_Cod": current_forn_code,
+                                                        "Fornecedor_Nome": current_forn_name,
+                                                        "Produto_Cod": codigo_prod,
+                                                        "Produto_Desc": produto,
+                                                        "Qtd_Cx": qtd_cx,
+                                                        "Padrao": padrao,
+                                                        "Custo": custo
+                                                    })
+                                            except: pass
 
                     if not records:
-                        st.error("❌ O robô não encontrou pedidos válidos.")
+                        st.error("❌ O robô não encontrou pedidos válidos. O formato do ficheiro foge completamente à Matriz.")
                         st.stop()
 
                     df_pedidos = pd.DataFrame(records)
 
-                    # Construção Visual do Excel (Compatibilidade Estrita Doca/Sauron)
+                    linhas_antes = len(df_pedidos)
+                    df_pedidos = df_pedidos.drop_duplicates(subset=['Loja', 'Fornecedor_Nome', 'Produto_Cod'], keep='first')
+                    linhas_removidas = linhas_antes - len(df_pedidos)
+
                     wb = Workbook()
                     wb.remove(wb.active)
                     data_hoje = datetime.now(fuso_br).strftime("%d/%m/%Y")
@@ -489,13 +489,11 @@ with aba_preparador:
                     align_center = Alignment(horizontal="center", vertical="center")
                     align_left = Alignment(horizontal="left", vertical="center")
 
-                    # Lojas ordenadas numericamente (1, 2, 3...)
                     lojas_encontradas = sorted(df_pedidos['Loja'].unique(), key=lambda x: int(x) if str(x).isdigit() else str(x))
 
                     for loja in lojas_encontradas:
                         ws = wb.create_sheet(title=f"Loja_{loja}")
                         
-                        # Linha 1: Fuso Horário e Identificação (Layout Doca)
                         ws.append([f"CONFERÊNCIA - LOJA {loja}", "", "", "", f"Data: {data_hoje}"])
                         ws.merge_cells('A1:C1')
                         ws['A1'].fill = header_fill
@@ -505,19 +503,15 @@ with aba_preparador:
                         ws['E1'].font = font_branca
                         ws['E1'].alignment = align_center
 
-                        # Linha 2: Cabeçalhos Fixos Exigidos pelos Sistemas Conectados
                         ws.append(["Código", "Descrição", "Qtd_Pedida", "Padrão_Cx", "Custo"])
                         for cell in ws[2]: 
                             cell.font = Font(bold=True)
                             cell.alignment = align_center
 
                         df_loja = df_pedidos[df_pedidos['Loja'] == loja]
-                        
-                        # Agrupar Fornecedores (mantendo Código e Nome integrados)
                         df_loja['Forn_Full'] = df_loja['Fornecedor_Cod'].astype(str) + " - " + df_loja['Fornecedor_Nome']
                         
                         for fornecedor_str in sorted(df_loja['Forn_Full'].unique()):
-                            # Linha de Fornecedor Protegida
                             ws.append([f"Fornecedor: {fornecedor_str}", "", "", "", ""])
                             ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=5)
                             for cell in ws[ws.max_row]:
@@ -525,28 +519,36 @@ with aba_preparador:
                                 cell.font = font_forn
                                 cell.alignment = align_left
                             
-                            # Produtos do Fornecedor
                             df_forn = df_loja[df_loja['Forn_Full'] == fornecedor_str]
                             for _, r in df_forn.iterrows():
-                                # Tratamento numérico para excel limpo
-                                cod_p = int(float(r['Produto_Cod'])) if str(r['Produto_Cod']).replace('.', '').isdigit() else r['Produto_Cod']
+                                cod_p = r['Produto_Cod']
+                                if str(cod_p).replace('.', '').isdigit():
+                                    cod_p = int(float(cod_p))
+                                
                                 qtd_c = int(r['Qtd_Cx']) if r['Qtd_Cx'].is_integer() else r['Qtd_Cx']
                                 pad_c = int(r['Padrao']) if r['Padrao'].is_integer() else r['Padrao']
                                 cst_c = r['Custo']
                                 
                                 ws.append([cod_p, r['Produto_Desc'], qtd_c, pad_c, cst_c])
+                                
+                                # Tipagem e formatação da célula de custo
+                                custo_cell = ws.cell(row=ws.max_row, column=5)
+                                custo_cell.number_format = 'R$ #,##0.00'
                         
-                        # Calibração Visual
                         ws.column_dimensions['A'].width = 15
                         ws.column_dimensions['B'].width = 45
                         ws.column_dimensions['C'].width = 15
                         ws.column_dimensions['D'].width = 15
-                        ws.column_dimensions['E'].width = 12
+                        ws.column_dimensions['E'].width = 15
 
                     out_io = io.BytesIO()
                     wb.save(out_io)
                     
-                    st.success(f"✅ Matriz Furtiva Concluída! Estrutura conectada e blindada para Doca e Auditoria.")
+                    msg_sucesso = f"✅ Matriz Furtiva Concluída! Estrutura conectada e blindada para Doca e Auditoria."
+                    if linhas_removidas > 0:
+                        msg_sucesso += f" ({linhas_removidas} pedidos duplicados bloqueados e neutralizados)."
+                    
+                    st.success(msg_sucesso)
                     st.download_button(
                         label="📥 Baixar Pedidos Formatados",
                         data=out_io.getvalue(),
