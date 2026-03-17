@@ -9,6 +9,14 @@ from datetime import datetime, timedelta, timezone
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 import psycopg2
+import logging
+
+# Configuração de Observabilidade
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+)
+logger = logging.getLogger("FLV_Enterprise")
 
 # --- MOTOR COGNITIVO ---
 try:
@@ -51,48 +59,54 @@ def descobrir_loja(cnpj_dest, nome_dest, mapping_nome, mapping_cnpj):
 # 1. REPOSITORY LAYER
 # ==========================================
 class DatabaseRepository:
-    def carregar_dicionario_depara(self):
+    
+    @staticmethod
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def carregar_dicionario_depara():
         dict_depara = {}
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT cnpj_fornecedor, cod_produto_xml, descricao_interna, fator_conversao FROM depara_flv")
-            for row in cursor.fetchall():
-                cnpj, cod_xml, desc_int, fator = row
-                # BLINDAGEM DAS UVAS: Remove zeros à esquerda e letras do CNPJ
-                cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
-                cod_xml_limpo = str(cod_xml).strip().lstrip('0')
-                dict_depara[(cnpj_limpo, cod_xml_limpo)] = (str(desc_int).strip(), float(fator))
-        finally:
-            if conn: conn.close()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT cnpj_fornecedor, cod_produto_xml, descricao_interna, fator_conversao FROM depara_flv")
+                    for row in cursor.fetchall():
+                        cnpj, cod_xml, desc_int, fator = row
+                        cnpj_limpo = ''.join(filter(str.isdigit, str(cnpj)))
+                        cod_xml_limpo = str(cod_xml).strip().lstrip('0')
+                        dict_depara[(cnpj_limpo, cod_xml_limpo)] = (str(desc_int).strip(), float(fator))
+        except psycopg2.Error as e:
+            logger.error(f"Erro de banco de dados ao carregar De-Para: {e}")
+            raise
         return dict_depara
 
-    def carregar_mapeamento_fornecedores(self):
+    @staticmethod
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def carregar_mapeamento_fornecedores():
         mapping = {}
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT nome_original, nome_macro FROM fornecedores_mapeamento ORDER BY prioridade DESC")
-            for original, macro in cursor.fetchall():
-                mapping[original.upper().strip()] = macro
-        finally:
-            if conn: conn.close()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT nome_original, nome_macro FROM fornecedores_mapeamento ORDER BY prioridade DESC")
+                    for original, macro in cursor.fetchall():
+                        mapping[original.upper().strip()] = macro
+        except psycopg2.Error as e:
+            logger.error(f"Erro de banco de dados ao carregar Fornecedores: {e}")
+            raise
         return mapping
 
-    def carregar_mapeamento_lojas(self):
+    @staticmethod
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def carregar_mapeamento_lojas():
         mapping_nome, mapping_cnpj = [], []
-        conn = None
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT padrao, tipo, loja FROM lojas_mapeamento ORDER BY prioridade DESC")
-            for padrao, tipo, loja in cursor.fetchall():
-                if tipo == 'N': mapping_nome.append((padrao.upper(), loja))
-                else: mapping_cnpj.append((padrao, loja))
-        finally:
-            if conn: conn.close()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT padrao, tipo, loja FROM lojas_mapeamento ORDER BY prioridade DESC")
+                    for padrao, tipo, loja in cursor.fetchall():
+                        if tipo == 'N': mapping_nome.append((padrao.upper(), loja))
+                        else: mapping_cnpj.append((padrao, loja))
+        except psycopg2.Error as e:
+            logger.error(f"Erro de banco de dados ao carregar Lojas: {e}")
+            raise
         return mapping_nome, mapping_cnpj
 
 class NFeRepository:
@@ -130,27 +144,14 @@ class NFeRepository:
                     cod_xml = cod_node.text.strip() if cod_node is not None else ""
                     qtd_xml = float(qtd_node.text)
 
-                    # BLINDAGEM DAS UVAS (Lado do XML)
                     cnpj_forn_limpo = ''.join(filter(str.isdigit, cnpj_forn))
                     cod_xml_limpo = cod_xml.lstrip('0')
 
-                    # ==========================================
-                    # 🕵️‍♂️ INÍCIO DO CÓDIGO ESPIÃO
-                    # ==========================================
                     if prod_node.text and "UVA" in prod_node.text.upper():
-                        print(f"\n🕵️ ACHOU UVA NO XML!")
-                        print(f"   -> Produto: {prod_node.text}")
-                        print(f"   -> CNPJ Limpo: '{cnpj_forn_limpo}'")
-                        print(f"   -> Cód XML Limpo: '{cod_xml_limpo}'")
-                        print(f"   -> Loja Destino: {loja_xml}\n")
+                        logger.info(f"Monitoramento UVA: Produto='{prod_node.text}', CNPJ='{cnpj_forn_limpo}', COD='{cod_xml_limpo}', Loja={loja_xml}")
                     
                     if loja_xml == "Loja_Desconhecida":
-                        print(f"\n⚠️ XML SEM DONO (LOJA NÃO MAPEADA)!")
-                        print(f"   -> CNPJ Destino no XML: '{dest_node.text}'")
-                        print(f"   -> Nome Destino no XML: '{dest_nome_node.text}'\n")
-                    # ==========================================
-                    # FIM DO CÓDIGO ESPIÃO
-                    # ==========================================
+                        logger.warning(f"XML Órfão Detectado: CNPJ Destino='{dest_node.text}', Nome Destino='{dest_nome_node.text}'")
 
                     origem_match = "XML (Fuzzy)"
                     nome_final = normalizar(prod_node.text)
@@ -163,9 +164,13 @@ class NFeRepository:
                         origem_match = "De-Para ⚡"
 
                     notas.append({"Loja": loja_xml, "Fornecedor_Macro": forn_macro, "Produto": nome_final, "Qtd": qtd_final, "Origem": origem_match})
+            
+            except ET.ParseError as e:
+                logger.error(f"Falha de integridade. XML inválido ou corrompido descartado. {e}")
             except Exception as e: 
-                print(f"Erro ao ler um XML: {e}")
-                pass
+                logger.critical(f"Falha sistêmica ao ler XML: {e}")
+                raise
+        
         return pd.DataFrame(notas), textos_infcpl
 
 class PedidoRepository:
@@ -191,13 +196,23 @@ class PedidoRepository:
         return pd.DataFrame(pedidos_lista)
 
 # ==========================================
-# 2. SERVICE LAYER (As 4 Fases Implacáveis)
+# 2. SERVICE LAYER
 # ==========================================
 class AuditoriaService:
     def __init__(self, usar_ia, fuzzy_threshold):
         self.usar_ia = usar_ia
         self.TOLERANCIA_DIF = 0.001
         self.FUZZY_THRESHOLD = fuzzy_threshold
+        self.model = None
+        
+        # Otimização: Instância Singleton do motor cognitivo por ciclo
+        if self.usar_ia and HAS_IA and "GEMINI_API_KEY" in st.secrets:
+            try:
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                self.model = genai.GenerativeModel("gemini-1.5-flash")
+            except Exception as e:
+                logger.error(f"Falha na alocação do modelo de IA: {e}")
+                self.model = None
 
     def _classificar(self, qtd_ped, qtd_fat, tipo):
         if tipo == "SEM_FORNECEDOR": return ("⚪ SEM NFe P/ FORN", 98, -qtd_ped)
@@ -208,16 +223,17 @@ class AuditoriaService:
         return (f"🟡 NFe SOBRA {diferenca:.2f}".replace('.00',''), 1, diferenca)
 
     def _analisar_com_ia(self, produto, diferenca_negativa, texto_infcpl):
-        if not self.usar_ia or not HAS_IA or "GEMINI_API_KEY" not in st.secrets: return False, ""
-        if not texto_infcpl or len(texto_infcpl.strip()) < 5: return False, ""
+        if not self.model or not texto_infcpl or len(texto_infcpl.strip()) < 5: 
+            return False, ""
+        
         try:
-            genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-            model = genai.GenerativeModel("gemini-1.5-flash")
             prompt = f"Houve FALTA de {abs(diferenca_negativa)} de '{produto}'. O fornecedor escreveu na nota: '{texto_infcpl}'. Isso justifica a falta? Responda ESTRITAMENTE: [SIM] ou [NAO] - Justificativa em 10 palavras."
-            resposta = model.generate_content(prompt).text.strip()
+            resposta = self.model.generate_content(prompt).text.strip()
             if resposta.startswith("[SIM]"): return True, resposta
             return False, resposta
-        except Exception: return False, "Erro IA"
+        except Exception as e: 
+            logger.warning(f"Timeout ou falha na inferência (Produto: {produto}): {e}")
+            return False, "Erro IA"
 
     def processar_cruzamento(self, df_pedidos, df_notas, textos_infcpl):
         if df_pedidos.empty: return pd.DataFrame()
@@ -238,7 +254,7 @@ class AuditoriaService:
 
             matched_ped_idx, matched_xml_idx = set(), set()
 
-            # FASE 1: Match Perfeito ou De-Para
+            # FASE 1: O(1) Match Perfeito ou De-Para
             for idx_ped, ped in df_ped_group.iterrows():
                 for idx_xml, nota in notas_forn.iterrows():
                     if idx_ped in matched_ped_idx or idx_xml in matched_xml_idx: continue
@@ -251,7 +267,7 @@ class AuditoriaService:
                             if justificado: stat_v = f"🤖 JUSTIFICADO (Faltou {abs(dif):.0f})"; just_ia = just_texto
                         registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], nota['Produto'], ped['Qtd'], nota['Qtd'], nota['Origem'], dif, stat_v, stat_c, just_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
 
-            # FASE 2: Match Fuzzy Controlado (SÓ entra se bater o Threshold)
+            # FASE 2: O(N*M) Match Fuzzy Controlado
             pairs = []
             for idx_ped, ped in df_ped_group.iterrows():
                 if idx_ped in matched_ped_idx: continue
@@ -272,13 +288,13 @@ class AuditoriaService:
                         if justificado: stat_v = f"🤖 JUSTIFICADO (Faltou {abs(dif):.0f})"; just_ia = just_texto
                     registros.append((loja, df_ped_group.loc[idx_ped, 'Fornecedor_Original'], df_ped_group.loc[idx_ped, 'Produto'], prod_xml, qtd_ped, qtd_fat, origem_m, dif, stat_v, stat_c, just_ia, "-", "-", "⚪ SEM CONTAGEM", 0.0))
 
-            # FASE 3: Faltas (Não encontrou na NFe)
+            # FASE 3: Resíduos (Faltas reais)
             for idx_ped, ped in df_ped_group.iterrows():
                 if idx_ped not in matched_ped_idx:
                     stat_v, stat_c, dif = self._classificar(ped['Qtd'], 0, "SEM_PRODUTO")
                     registros.append((loja, ped['Fornecedor_Original'], ped['Produto'], "❌ NÃO ENCONTRADA", ped['Qtd'], 0, "-", dif, stat_v, stat_c, "", "-", "-", "⚪ SEM CONTAGEM", 0.0))
 
-            # FASE 4: Notas Extras (Veio na NFe mas não foi pedido)
+            # FASE 4: Resíduos (Sobra/Não Pedido na NFe)
             for idx_xml, nota in notas_forn.iterrows():
                 if idx_xml not in matched_xml_idx:
                     stat_v = f"🟡 NFe EXTRA {nota['Qtd']:.2f}".replace('.00','')
@@ -361,14 +377,8 @@ with aba_preparador:
 
     if arquivo_flv_bruto:
         if st.button("⚙️ Processar, Limpar e Roteirizar Pedidos"):
-            with st.spinner("Varredura Omnidirecional: Escaneando todas as abas e blindando estrutura..."):
+            with st.spinner("Varredura Omnidirecional: Escaneando abas e blindando estrutura..."):
                 try:
-                    import io
-                    import re
-                    from datetime import datetime, timedelta, timezone
-                    from openpyxl import Workbook
-                    from openpyxl.styles import PatternFill, Font, Alignment
-
                     fuso_br = timezone(timedelta(hours=-3))
 
                     if arquivo_flv_bruto.name.endswith('.csv'):
@@ -469,7 +479,7 @@ with aba_preparador:
                                             except: pass
 
                     if not records:
-                        st.error("❌ O robô não encontrou pedidos válidos. O formato do ficheiro foge completamente à Matriz.")
+                        st.error("❌ O robô não encontrou pedidos válidos.")
                         st.stop()
 
                     df_pedidos = pd.DataFrame(records)
@@ -531,7 +541,6 @@ with aba_preparador:
                                 
                                 ws.append([cod_p, r['Produto_Desc'], qtd_c, pad_c, cst_c])
                                 
-                                # Tipagem e formatação da célula de custo
                                 custo_cell = ws.cell(row=ws.max_row, column=5)
                                 custo_cell.number_format = 'R$ #,##0.00'
                         
@@ -544,9 +553,9 @@ with aba_preparador:
                     out_io = io.BytesIO()
                     wb.save(out_io)
                     
-                    msg_sucesso = f"✅ Matriz Furtiva Concluída! Estrutura conectada e blindada para Doca e Auditoria."
+                    msg_sucesso = f"✅ Matriz Concluída!"
                     if linhas_removidas > 0:
-                        msg_sucesso += f" ({linhas_removidas} pedidos duplicados bloqueados e neutralizados)."
+                        msg_sucesso += f" ({linhas_removidas} duplicados ignorados)."
                     
                     st.success(msg_sucesso)
                     st.download_button(
@@ -557,6 +566,7 @@ with aba_preparador:
                     )
 
                 except Exception as e:
+                    logger.error(f"Erro na extração de preparação: {e}")
                     st.error(f"Erro na extração dos dados comerciais: {e}")
 
 with aba_auditoria:
@@ -568,7 +578,7 @@ with aba_auditoria:
     
     col_ia, col_slider = st.columns([1, 2])
     with col_ia: usar_ia = st.checkbox("🧠 Ativar Auditor IA", value=HAS_IA)
-    with col_slider: fuzzy_threshold = st.slider("🎯 Limiar de Similaridade (Abaixo disso = Não Encontrada)", min_value=50, max_value=100, value=85, step=1)
+    with col_slider: fuzzy_threshold = st.slider("🎯 Limiar de Similaridade", min_value=50, max_value=100, value=85, step=1)
 
     if st.button("Executar Auditoria Implacável"):
         if not arquivo_excel or not arquivos_xml: st.warning("⚠️ Precisa de Pedido e XMLs.")
@@ -585,7 +595,9 @@ with aba_auditoria:
                         st.success("✅ Auditoria Concluída com Sucesso!")
                         st.download_button(label="📥 Baixar Auditoria", data=out_audit.getvalue(), file_name=f"Auditoria_{datetime.now().strftime('%Y%m%d%H%M')}.xlsx")
                     else: st.error("❌ Nenhum dado cruzado.")
-                except Exception as e: st.error(f"❌ Erro crítico: {e}")
+                except Exception as e: 
+                    logger.critical(f"Erro crítico no processamento da auditoria: {e}")
+                    st.error(f"❌ Erro crítico: {e}")
 
 with aba_gestao:
     st.header("⚙️ Painel de Gestão (De-Para)")
