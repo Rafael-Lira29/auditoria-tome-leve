@@ -441,6 +441,11 @@ with aba_preparador:
                                 ignore_list = ["PEDIDO FLV", "PEDIDO HORTIFRUT", "CÓD", "CODIGO", "CÓDIGO", "DESCRIÇÃO", "DESCRICAO", "TOTAL", "MÉDIA", "MEDIA", "FORNECEDOR", "ESTOQUE"]
                                 
                                 if not any(col0.startswith(x) for x in ignore_list):
+                                    
+                                    # 🛑 BARREIRA DE PROTEÇÃO CONTRA ABAS DE RESUMO
+                                    if current_forn_name == "INDEFINIDO":
+                                        continue
+                                    
                                     codigo_prod = str(row[0]).strip()
                                     produto = str(row[1]).strip()
                                     
@@ -553,9 +558,9 @@ with aba_preparador:
                     out_io = io.BytesIO()
                     wb.save(out_io)
                     
-                    msg_sucesso = f"✅ Matriz Concluída!"
+                    msg_sucesso = f"✅ Matriz Concluída com Integridade Transacional!"
                     if linhas_removidas > 0:
-                        msg_sucesso += f" ({linhas_removidas} duplicados ignorados)."
+                        msg_sucesso += f" ({linhas_removidas} registros de abas clonadas descartados)."
                     
                     st.success(msg_sucesso)
                     st.download_button(
